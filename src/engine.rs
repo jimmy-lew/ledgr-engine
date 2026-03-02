@@ -1,12 +1,28 @@
 //! # LedgerEngine – Public API
 //!
-//! Coordinates the WAL, MemTable, and single-file Storage layer.
+//! ## Double-entry enforcement
+//!
+//! The *only* write path is `record_journal_entry(entry)`.  The engine
+//! validates the accounting invariant **before touching any I/O**:
+//!
+//! ```text
+//! ∑ leg.signed_amount() == 0     (debits == credits)
+//! ```
+//!
+//! If that check fails the entire entry is rejected with
+//! `LedgerError::JournalNotBalanced` and nothing is written to the WAL
+//! or the MemTable.  There is no API that lets a caller write a single
+//! unmatched leg.
+//!
+//! For the common two-account case use the convenience method:
+//!
+//! ```rust,ignore
+//! engine.record_simple_entry(debit_acct, credit_acct, 50_000, "Rent")?;
+//! ```
 //!
 //! ## Concurrency model
 //!
-//! A `parking_lot::RwLock` wraps the mutable inner state.  Concurrent reads
-//! (`validate_ledger`, `get_expense_summary`) acquire a shared read lock.
-//! All writes (`append_transaction`) take an exclusive write lock.
+//! A `parking_lot::RwLock` wraps all mutable state.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -17,37 +33,32 @@ use parking_lot::RwLock;
 
 use crate::error::{LedgerError, Result};
 use crate::hash_chain::ChainTip;
-use crate::models::{AccountType, ExpenseSummary, Transaction, TransactionType};
+use crate::models::{
+    AccountType, Direction, ExpenseSummary, JournalEntry, Leg, Transaction, TransactionType,
+};
 use crate::simd_scan;
 use crate::storage::Storage;
-use crate::wal::Wal;
+use crate::wal::{Wal, WalEntry};
 
-// ──────────────────────────────────────────────────────────────────────────────
-// MemTable  (in-process buffer; keyed by (timestamp, id) for ordered flush)
-// ──────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// MemTable
+// ─────────────────────────────────────────────────────────────────────────────
 
-/// Transactions accumulate here between WAL writes and segment flushes.
 struct MemTable {
-    rows: BTreeMap<(u64, u64), Transaction>,
+    rows:       BTreeMap<(u64, u64), Transaction>,  // key = (timestamp, leg_id)
     size_bytes: usize,
 }
 
 impl MemTable {
-    fn new() -> Self {
-        Self {
-            rows: BTreeMap::new(),
-            size_bytes: 0,
-        }
-    }
+    fn new() -> Self { Self { rows: BTreeMap::new(), size_bytes: 0 } }
 
     fn insert(&mut self, tx: Transaction) {
-        self.size_bytes += 8 + 8 + 8 + 1 + 8 + 4 + tx.description.len() + 32;
+        // Approximate size: fixed fields + description + hash
+        self.size_bytes += 8 + 8 + 8 + 8 + 1 + 8 + 4 + tx.description.len() + 32;
         self.rows.insert((tx.timestamp, tx.id), tx);
     }
 
-    fn needs_flush(&self) -> bool {
-        self.size_bytes >= FLUSH_THRESHOLD
-    }
+    fn needs_flush(&self) -> bool { self.size_bytes >= FLUSH_THRESHOLD }
 
     fn drain_sorted(&mut self) -> Vec<Transaction> {
         let rows: Vec<_> = self.rows.values().cloned().collect();
@@ -56,85 +67,64 @@ impl MemTable {
         rows
     }
 
-    fn iter(&self) -> impl Iterator<Item = &Transaction> {
-        self.rows.values()
-    }
-
-    fn is_empty(&self) -> bool {
-        self.rows.is_empty()
-    }
+    fn iter(&self) -> impl Iterator<Item = &Transaction> { self.rows.values() }
+    fn is_empty(&self) -> bool { self.rows.is_empty() }
 }
 
-/// Flush MemTable when it exceeds 4 MiB.
 const FLUSH_THRESHOLD: usize = 4 * 1024 * 1024;
 
-// ──────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 // Inner state
-// ──────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 
 struct Inner {
-    storage: Storage,
-    wal: Wal,
-    memtable: MemTable,
-    chain_tip: ChainTip,
+    storage:    Storage,
+    wal:        Wal,
+    memtable:   MemTable,
+    chain_tip:  ChainTip,
+    /// Monotonically increasing counter shared between journal entry IDs
+    /// and individual leg IDs (engine uses one AtomicU64 for both).
+    next_entry_id: u64,
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// LedgerEngine (the public handle)
-// ──────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// LedgerEngine
+// ─────────────────────────────────────────────────────────────────────────────
 
 pub struct LedgerEngine {
-    inner: RwLock<Inner>,
+    inner:   RwLock<Inner>,
     next_id: AtomicU64,
 }
 
 impl LedgerEngine {
     // ── Open / recover ─────────────────────────────────────────────────────
 
-    /// Open (or create) an engine.
-    ///
-    /// `data_path` is the single `.ldg` file.  The WAL is placed alongside
-    /// it with a `.wal` suffix.
     pub fn open(data_path: impl AsRef<Path>) -> Result<Self> {
         let data_path = data_path.as_ref().to_path_buf();
-        let wal_path = data_path.with_extension("wal");
+        let wal_path  = data_path.with_extension("wal");
 
-        let storage = Storage::open(&data_path)?;
-        let wal = Wal::open(&wal_path)?;
+        let mut storage  = Storage::open(&data_path)?;
+        let     wal      = Wal::open(&wal_path)?;
 
-        // Recover any transactions that were in the WAL but not yet flushed
         let recovered = wal.replay()?;
         let mut memtable = MemTable::new();
-        let mut max_id: u64 = storage
-            .accounts
-            .values()
-            .map(|(_, a)| a.id)
-            .max()
-            .unwrap_or(0);
+        let mut max_id: u64 = storage.header.total_tx_count;
 
-        // Seed the chain tip from the last written hash
         let chain_tip = ChainTip::new(storage.header.last_tx_hash);
 
         for tx in recovered {
-            if tx.id > max_id {
-                max_id = tx.id;
-            }
+            if tx.id > max_id { max_id = tx.id; }
             memtable.insert(tx);
-        }
-
-        // Also track max ID from all existing segments
-        let seg_tx_count = storage.header.total_tx_count;
-        if seg_tx_count > max_id {
-            max_id = seg_tx_count;
         }
 
         Ok(Self {
             next_id: AtomicU64::new(max_id + 1),
-            inner: RwLock::new(Inner {
+            inner:   RwLock::new(Inner {
                 storage,
                 wal,
                 memtable,
                 chain_tip,
+                next_entry_id: max_id + 1,
             }),
         })
     }
@@ -146,55 +136,121 @@ impl LedgerEngine {
         self.inner.write().storage.add_account(name, kind, now)
     }
 
-    // ── Primary write path ─────────────────────────────────────────────────
+    // ── Primary write path: record a complete journal entry ────────────────
 
-    /// Append one side of a double-entry transaction.
+    /// Record a fully balanced double-entry journal entry.
     ///
-    /// The transaction is first written to the WAL (durability), then
-    /// buffered in the MemTable.  A flush is triggered automatically when
-    /// the MemTable exceeds the size threshold.
-    pub fn append_transaction(
-        &self,
-        account_id: u64,
-        amount_cents: i64,
-        transaction_type: TransactionType,
-        description: &str,
-    ) -> Result<u64> {
+    /// ## What "double-entry" means here
+    ///
+    /// Every economic event must be described by at least **two** legs where
+    /// debits and credits are equal.  Classic examples:
+    ///
+    /// ```text
+    /// Cash sale of $500:
+    ///   DEBIT  Cash            +500   (asset increases)
+    ///   CREDIT Revenue         −500   (revenue increases)
+    ///
+    /// Purchase a $1 200 laptop: $200 cash + $1 000 on account:
+    ///   DEBIT  Equipment      +1200   (asset increases)
+    ///   CREDIT Cash            −200   (asset decreases)
+    ///   CREDIT Accounts Pay.  −1000   (liability increases)
+    /// ```
+    ///
+    /// ## Guarantee
+    ///
+    /// `JournalEntry::validate()` is called **before any I/O**.  If it
+    /// returns an error, the WAL and MemTable are untouched.  After
+    /// validation, all legs are written to the WAL as **one atomic record**
+    /// and then inserted into the MemTable together — partial commits are
+    /// impossible.
+    ///
+    /// Returns the `journal_entry_id` assigned to the entry.
+    pub fn record_journal_entry(&self, entry: JournalEntry) -> Result<u64> {
+        // ── 1. Validate accounting invariant (pure, no I/O) ───────────────
+        entry.validate()?;
+
         let mut inner = self.inner.write();
 
-        if !inner.storage.accounts.contains_key(&account_id) {
-            return Err(LedgerError::UnknownAccount(account_id));
+        // ── 2. Validate all referenced accounts exist ─────────────────────
+        for (i, leg) in entry.legs.iter().enumerate() {
+            if !inner.storage.accounts.contains_key(&leg.account_id) {
+                return Err(LedgerError::UnknownAccount(leg.account_id));
+            }
         }
 
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let tx = Transaction {
-            id,
-            account_id,
-            amount: amount_cents,
-            transaction_type,
-            timestamp: unix_now(),
-            description: description.to_string(),
-            tx_hash: [0u8; 32], // filled in by flush_segment / chain_tip
+        let now              = unix_now();
+        let journal_entry_id = {
+            let id = inner.next_entry_id;
+            inner.next_entry_id += 1;
+            id
         };
 
-        // 1. Durable WAL write (hash is [0;32] until flush – WAL is for recovery
-        //    only; the real hash is computed during flush)
-        inner.wal.append(&tx)?;
+        // ── 3. Construct leg Transaction rows ─────────────────────────────
+        // Hashes are [0;32] at this stage; they are computed during flush
+        // by the ChainTip (which reads from the MemTable's drain_sorted).
+        // For WAL records we store the [0;32] placeholder; on replay the
+        // engine re-inserts them into the MemTable and recomputes on flush.
+        let legs: Vec<Transaction> = entry.legs.iter().map(|leg| {
+            let leg_id = self.next_id.fetch_add(1, Ordering::Relaxed);
+            Transaction {
+                id:               leg_id,
+                journal_entry_id,
+                account_id:       leg.account_id,
+                amount:           leg.signed_amount(),
+                transaction_type: leg.direction,
+                timestamp:        now,
+                description:      entry.description.clone(),
+                tx_hash:          [0u8; 32],
+            }
+        }).collect();
 
-        // 2. Update running account balance
-        inner
-            .storage
-            .update_account_balance(account_id, amount_cents)?;
+        // ── 4. Atomic WAL write (all legs in one record) ──────────────────
+        let wal_entry = WalEntry {
+            journal_entry_id,
+            timestamp: now,
+            description: entry.description.clone(),
+            legs: legs.clone(),
+        };
+        inner.wal.append_journal_entry(&wal_entry)?;
 
-        // 3. MemTable
-        inner.memtable.insert(tx);
+        // ── 5. Update account balances and populate MemTable ──────────────
+        for leg in &legs {
+            inner.storage.update_account_balance(leg.account_id, leg.amount)?;
+            inner.memtable.insert(leg.clone());
+        }
 
-        // 4. Auto-flush if threshold exceeded
+        // ── 6. Auto-flush if MemTable threshold exceeded ──────────────────
         if inner.memtable.needs_flush() {
             Self::do_flush(&mut inner)?;
         }
 
-        Ok(id)
+        Ok(journal_entry_id)
+    }
+
+    /// Convenience method for the common **two-account** journal entry.
+    ///
+    /// Records a single balanced pair:
+    ///
+    /// ```text
+    ///   DEBIT  debit_account   amount_cents
+    ///   CREDIT credit_account  amount_cents
+    /// ```
+    ///
+    /// Returns the `journal_entry_id`.
+    pub fn record_simple_entry(
+        &self,
+        debit_account:  u64,
+        credit_account: u64,
+        amount_cents:   u64,
+        description:    &str,
+    ) -> Result<u64> {
+        self.record_journal_entry(JournalEntry::new(
+            description,
+            vec![
+                Leg::debit(debit_account,  amount_cents),
+                Leg::credit(credit_account, amount_cents),
+            ],
+        ))
     }
 
     // ── validate_ledger ─────────────────────────────────────────────────────
@@ -202,62 +258,56 @@ impl LedgerEngine {
     /// Two-phase validation:
     ///
     /// ### Phase 1 – SIMD Balance Scan
-    /// Loads only the `amount` column from every segment.  Uses AVX2 SIMD
-    /// (or a scalar fallback) to sum all values in parallel.  Also sums the
-    /// MemTable rows.  Asserts `∑amounts = 0`.
     ///
-    /// Cross-checks against `∑account.balance` from the Accounts table.
+    /// Loads the `amount` column (signed i64) from every segment plus the
+    /// MemTable.  Calls `simd_sum_i64` which dispatches to AVX2 on x86_64
+    /// or a scalar fallback elsewhere.
+    ///
+    /// Asserts:  **∑ all amounts = 0**
+    ///
+    /// Cross-checks against **∑ account.balance** from the fixed-size
+    /// Accounts region.  Any discrepancy flags a storage-level bug.
     ///
     /// ### Phase 2 – Hash Chain Integrity Walk
-    /// Re-reads all rows in global order and re-computes
-    /// `SHA-256(tx_fields ‖ prev_hash)` for each one, comparing it to the
-    /// stored `tx_hash`.  Any mismatch indicates historical tampering.
+    ///
+    /// Replays SHA-256(leg_fields ‖ prev_hash) for every flushed leg in
+    /// global order.  A mismatch proves that a historical row was altered.
     pub fn validate_ledger(&self) -> Result<()> {
-        let mut inner = self.inner.write(); // exclusive for file seeking
+        let mut inner = self.inner.write();
 
-        // ────────────────────────────────────────────────────────────────────
-        // Phase 1: SIMD amount scan
-        // ────────────────────────────────────────────────────────────────────
-
+        // ── Phase 1: SIMD amount scan ──────────────────────────────────────
         let mut all_amounts: Vec<i64> = Vec::new();
 
         for seg in inner.storage.segments.clone() {
-            let amounts = inner.storage.read_amounts(&seg)?;
-            all_amounts.extend_from_slice(&amounts);
+            all_amounts.extend(inner.storage.read_amounts(&seg)?);
         }
-
-        // Include unflushed MemTable rows
         for tx in inner.memtable.iter() {
             all_amounts.push(tx.amount);
         }
 
-        // SIMD sum: hardware-dispatched AVX2 or scalar fallback
-        let net = simd_scan::simd_sum_i64(&all_amounts);
-
-        // Also verify against the account balance table
+        let net         = simd_scan::simd_sum_i64(&all_amounts);
         let balance_sum = inner.storage.account_balance_sum();
+
         if balance_sum != net {
             return Err(LedgerError::Encoding(format!(
-                "Account balance sum ({balance_sum}) != transaction sum ({net})"
+                "Internal inconsistency: ∑account.balance ({balance_sum}) \
+                 ≠ ∑transaction.amount ({net})"
             )));
         }
-
         if net != 0 {
             return Err(LedgerError::ImbalancedLedger { net });
         }
 
         println!(
-            "[validate_ledger] Phase 1 ✓  SIMD net = {net} cents  \
-             (∑account.balance = {balance_sum})  rows checked = {}",
+            "[validate] Phase 1 ✓  SIMD net = {net} ¢  \
+             ∑account.balance = {balance_sum} ¢  \
+             rows = {}",
             all_amounts.len()
         );
 
-        // ────────────────────────────────────────────────────────────────────
-        // Phase 2: Hash chain integrity walk
-        // ────────────────────────────────────────────────────────────────────
-
-        let mut prev_hash: [u8; 32] = inner.storage.header.genesis_hash;
-        let mut global_row: u64 = 0;
+        // ── Phase 2: Hash chain walk ───────────────────────────────────────
+        let mut prev_hash  = inner.storage.header.genesis_hash;
+        let mut global_row = 0u64;
 
         for seg in inner.storage.segments.clone() {
             let txs = inner.storage.read_all_transactions(&seg)?;
@@ -265,30 +315,19 @@ impl LedgerEngine {
                 let expected = crate::hash_chain::compute_tx_hash(tx, &prev_hash);
                 if expected != tx.tx_hash {
                     return Err(LedgerError::HashChainViolation {
-                        row: global_row,
+                        row:      global_row,
                         expected: hex::encode(expected),
-                        actual: hex::encode(tx.tx_hash),
+                        actual:   hex::encode(tx.tx_hash),
                     });
                 }
-                prev_hash = tx.tx_hash;
+                prev_hash  = tx.tx_hash;
                 global_row += 1;
             }
         }
 
-        // Walk MemTable rows (these have [0;32] hashes – they are not yet
-        // in the chain; verify they chain from the current tip)
-        for tx in inner.memtable.iter() {
-            let expected = crate::hash_chain::compute_tx_hash(tx, &prev_hash);
-            // MemTable hashes are set to [0;32] until flush – just verify
-            // that their *fields* are internally consistent (no hash stored yet)
-            let _ = expected; // acknowledged; full hash set on flush
-        }
-
         println!(
-            "[validate_ledger] Phase 2 ✓  Hash chain intact across \
-             {global_row} flushed rows"
+            "[validate] Phase 2 ✓  Hash chain intact across {global_row} flushed rows"
         );
-
         Ok(())
     }
 
@@ -296,75 +335,58 @@ impl LedgerEngine {
 
     /// Aggregate debits and credits for `[start_ts, end_ts]`.
     ///
-    /// ## Optimisation layers (innermost first)
-    ///
-    /// 1. **Sparse index** – binary-search to find the first candidate
-    ///    `global_row_idx` ≥ start of range.  Skip all rows before it.
-    /// 2. **Zone map** – compare `(start_ts, end_ts)` against segment
-    ///    `(min_ts, max_ts)`.  Skip entire segments with no overlap.
-    /// 3. **Columnar reads** – for relevant segments, read only the
-    ///    `timestamp`, `amount`, and `tx_type` columns.
-    /// 4. **SIMD accumulation** – vectorised debit/credit split-sum.
+    /// Optimisation layers applied in order:
+    /// 1. **Sparse index** binary-search → O(log N) first-candidate row.
+    /// 2. **Zone-map** per-segment `(min_ts, max_ts)` comparison → whole
+    ///    segments are skipped when they have no overlap with the range.
+    /// 3. **Columnar read** of only `timestamp`, `amount`, `tx_type`.
+    /// 4. **SIMD split-sum** (`simd_sum_by_type`) for debit/credit totals.
     pub fn get_expense_summary(&self, start_ts: u64, end_ts: u64) -> Result<ExpenseSummary> {
         let mut inner = self.inner.write();
         let mut summary = ExpenseSummary::default();
 
-        // ── Use the sparse index to find the minimum global row to scan ─────
-        let first_candidate_row = inner.storage.sparse.lower_bound_row(start_ts);
+        let first_candidate = inner.storage.sparse.lower_bound_row(start_ts);
 
         let segments = inner.storage.segments.clone();
         for seg in &segments {
-            let seg_last_row = seg.header.first_row_global_idx + seg.header.row_count;
+            let seg_last = seg.header.first_row_global_idx + seg.header.row_count;
 
-            // ① Sparse skip: if this entire segment is before our window, skip
-            if seg_last_row <= first_candidate_row {
-                summary.sstables_skipped += 1;
+            if seg_last <= first_candidate {
+                summary.segments_skipped += 1;
                 continue;
             }
-
-            // ② Zone-map skip: no timestamp overlap
             if seg.header.max_ts < start_ts || seg.header.min_ts > end_ts {
-                summary.sstables_skipped += 1;
+                summary.segments_skipped += 1;
                 println!(
-                    "[get_expense_summary] ⏩ Zone-map skip: seg {} ts=[{},{}] ∩ [{},{}] = ∅",
-                    seg.seq, seg.header.min_ts, seg.header.max_ts, start_ts, end_ts
+                    "[summary] ⏩ Zone-map skip: seg {} ts=[{},{}]",
+                    seg.seq, seg.header.min_ts, seg.header.max_ts
                 );
                 continue;
             }
 
-            // ③ Read only the 3 relevant columns
             let timestamps = inner.storage.read_timestamps(seg)?;
-            let amounts = inner.storage.read_amounts(seg)?;
-            let tx_types = inner.storage.read_tx_types(seg)?;
+            let amounts    = inner.storage.read_amounts(seg)?;
+            let tx_types   = inner.storage.read_tx_types(seg)?;
 
-            // ④ Build row predicate and extract matching amounts/types
             let (filt_amounts, filt_types): (Vec<i64>, Vec<u8>) = timestamps
-                .iter()
-                .zip(amounts.iter())
-                .zip(tx_types.iter())
+                .iter().zip(amounts.iter()).zip(tx_types.iter())
                 .filter(|((&ts, _), _)| ts >= start_ts && ts <= end_ts)
                 .map(|((_, &amt), &t)| (amt, t))
                 .unzip();
 
-            if filt_amounts.is_empty() {
-                continue;
-            }
+            if filt_amounts.is_empty() { continue; }
 
-            // ⑤ SIMD split-sum for this segment
             let (d, c) = simd_scan::simd_sum_by_type(&filt_amounts, &filt_types);
-            summary.total_debits += d;
+            summary.total_debits  += d;
             summary.total_credits += c;
-            summary.row_count += filt_amounts.len() as u64;
+            summary.row_count     += filt_amounts.len() as u64;
         }
 
-        // ── MemTable rows ──────────────────────────────────────────────────
         for tx in inner.memtable.iter() {
-            if tx.timestamp < start_ts || tx.timestamp > end_ts {
-                continue;
-            }
+            if tx.timestamp < start_ts || tx.timestamp > end_ts { continue; }
             match tx.transaction_type {
-                TransactionType::Debit => summary.total_debits += tx.amount,
-                TransactionType::Credit => summary.total_credits += tx.amount,
+                Direction::Debit  => summary.total_debits  += tx.amount,
+                Direction::Credit => summary.total_credits += tx.amount,
             }
             summary.row_count += 1;
         }
@@ -387,15 +409,11 @@ impl LedgerEngine {
 
     fn do_flush(inner: &mut Inner) -> Result<()> {
         let rows = inner.memtable.drain_sorted();
-        let n = rows.len();
-
+        let n    = rows.len();
         inner.storage.flush_segment(rows, &mut inner.chain_tip)?;
         inner.wal.truncate()?;
-
-        println!(
-            "[flush] ✓  Flushed {n} rows to segment {}",
-            inner.storage.segments.len() - 1
-        );
+        println!("[flush] ✓  {n} legs → segment {}",
+            inner.storage.segments.len() - 1);
         Ok(())
     }
 }

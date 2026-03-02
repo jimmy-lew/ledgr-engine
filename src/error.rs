@@ -29,6 +29,33 @@ pub enum LedgerError {
     #[error("Unknown account id={0}")]
     UnknownAccount(u64),
 
+    /// Fired when a `JournalEntry` is submitted with fewer than 2 legs.
+    /// A journal entry needs at least one debit leg AND one credit leg.
+    #[error(
+        "Journal entry requires at least 2 legs (got {got}). \
+         Every transaction must come FROM somewhere and go TO somewhere."
+    )]
+    JournalTooFewLegs { got: usize },
+
+    /// Fired when ∑debit amounts ≠ ∑credit amounts.
+    /// The entry is rejected entirely — no legs are written to the WAL.
+    #[error(
+        "Journal entry is not balanced: debits={debits} cents, credits={credits} cents \
+         (difference = {diff} cents). ∑Debits − ∑Credits must equal 0.",
+        diff = (*debits as i64 - *credits as i64).abs()
+    )]
+    JournalNotBalanced { debits: u64, credits: u64 },
+
+    /// Fired when a leg references the same account as another leg in the
+    /// same journal entry and the combination is economically invalid
+    /// (e.g. debiting and crediting the exact same account for the exact
+    /// same amount — a no-op entry that shouldn't be recorded).
+    #[error(
+        "Journal entry leg {leg_index} references account {account_id} which appears \
+         in another leg with the same direction — this produces a no-op entry."
+    )]
+    JournalNoOp { leg_index: usize, account_id: u64 },
+
     #[error("MemTable is empty – nothing to flush")]
     EmptyFlush,
 
