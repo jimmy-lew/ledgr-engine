@@ -456,7 +456,14 @@ fn print_storage_meta(dbpath: &std::path::Path) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn main() -> Result<(), LedgerError> {
-    let dbpath = std::env::temp_dir().join("demo.ldg");
+    let args: Vec<String> = std::env::args().collect();
+
+    if args.len() > 1 && args[1] == "--benchmark" {
+        let num_entries = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(10000);
+        return run_benchmark(num_entries);
+    }
+
+    let dbpath = std::path::PathBuf::from("demo.ldb");
     let _ = std::fs::remove_file(&dbpath);
     let _ = std::fs::remove_file(dbpath.with_extension("wal"));
 
@@ -480,7 +487,7 @@ fn main() -> Result<(), LedgerError> {
     // ── Journal entries ───────────────────────────────────────────────────
 
     // J1: Founder injects $10 000 cash
-    engine.record_simple_entry(cash, equity, 1_000_000, "Founder equity injection")?;
+    engine.record_entry(cash, equity, 1_000_000, "Founder equity injection")?;
 
     // J2: Buy $1 200 laptop — $200 cash + $1 000 on account (3-way split)
     engine.record_journal_entry(JournalEntry::new(
@@ -493,16 +500,16 @@ fn main() -> Result<(), LedgerError> {
     ))?;
 
     // J3: Invoice customer $2 400
-    engine.record_simple_entry(ar, revenue, 240_000, "Invoice #1001")?;
+    engine.record_entry(ar, revenue, 240_000, "Invoice #1001")?;
 
     // J4: Customer pays invoice
-    engine.record_simple_entry(cash, ar, 240_000, "Payment of Invoice #1001")?;
+    engine.record_entry(cash, ar, 240_000, "Payment of Invoice #1001")?;
 
     // J5: Pay rent $1 200
-    engine.record_simple_entry(rent_exp, cash, 120_000, "Rent – April")?;
+    engine.record_entry(rent_exp, cash, 120_000, "Rent – April")?;
 
     // J6: Pay salaries $3 800
-    engine.record_simple_entry(sal_exp, cash, 380_000, "Salaries – April")?;
+    engine.record_entry(sal_exp, cash, 380_000, "Salaries – April")?;
 
     // ── Show state BEFORE flush (data lives in MemTable + WAL) ────────────
     println!("═══════════════════════════════════════════════════════════");
@@ -579,5 +586,88 @@ fn main() -> Result<(), LedgerError> {
     print_storage_meta(&dbpath);
 
     println!("\n✓  All done — ledger is balanced");
+    Ok(())
+}
+
+fn run_benchmark(num_entries: usize) -> Result<(), LedgerError> {
+    let dbpath = std::path::PathBuf::from("benchmark.ldb");
+    let _ = std::fs::remove_file(&dbpath);
+    let _ = std::fs::remove_file(dbpath.with_extension("wal"));
+
+    println!("╔══════════════════════════════════════════════════════════╗");
+    println!("║                    LOAD TEST BENCHMARK                   ║");
+    println!("╚══════════════════════════════════════════════════════════╝");
+    println!("Entries: {}\n", num_entries);
+
+    let engine = LedgerEngine::open(&dbpath)?;
+
+    let cash = engine.create_account("Cash", AccountType::Asset)?;
+    let equity = engine.create_account("Equity", AccountType::Equity)?;
+    let revenue = engine.create_account("Revenue", AccountType::Revenue)?;
+    let expense = engine.create_account("Expense", AccountType::Expense)?;
+
+    let start = std::time::Instant::now();
+    let mut wal_time = std::time::Duration::ZERO;
+    let mut memtable_time = std::time::Duration::ZERO;
+    let mut balance_time = std::time::Duration::ZERO;
+
+    for i in 0..num_entries {
+        let amount: u64 = ((i as i64 % 1000 + 1).unsigned_abs()) * 100;
+        let t0 = std::time::Instant::now();
+
+        if i % 4 == 0 {
+            engine.record_entry(cash, equity, amount, "Capital injection")?;
+        } else if i % 4 == 1 {
+            engine.record_entry(revenue, cash, amount, "Sale")?;
+        } else {
+            engine.record_entry(expense, cash, amount, "Expense")?;
+        }
+
+        let t1 = std::time::Instant::now();
+
+        // These are approximate - actual timing would need instrumentation in engine
+        wal_time += t1 - t0;
+        memtable_time += t1 - t0;
+    }
+
+    let write_time = start.elapsed();
+    println!("Wrote {} entries in {:.2?}", num_entries, write_time);
+    println!(
+        "  (WAL + MemTable insert per entry: {:.2?})",
+        write_time / num_entries as u32
+    );
+
+    let flush_start = std::time::Instant::now();
+    engine.force_flush()?;
+    let flush_time = flush_start.elapsed();
+    println!("Flushed to disk in {:.2?}", flush_time);
+
+    let validate_start = std::time::Instant::now();
+    engine.validate_ledger()?;
+    let validate_time = validate_start.elapsed();
+    println!("Validated in {:.2?}", validate_time);
+
+    let total_legs = num_entries * 2;
+    println!("Total legs written: {}", total_legs);
+
+    let total_time = start.elapsed();
+    println!("\n┌─────────────────────────────────────┐");
+    println!("│           BENCHMARK RESULTS         │");
+    println!("├─────────────────────────────────────┤");
+    println!("│  Total entries: {:>19} │", num_entries);
+    println!("│  Total legs: {:>22} │", num_entries * 2);
+    println!("│  Write time: {:>22?} │", write_time);
+    println!("│  Flush time: {:>22?} │", flush_time);
+    println!("│  Validate time: {:>19?} │", validate_time);
+    println!("│  Total time: {:>22?} │", total_time);
+    println!(
+        "│  Throughput: {:>20}/s │",
+        num_entries as f64 / total_time.as_secs_f64()
+    );
+    println!("└─────────────────────────────────────┘");
+
+    let metadata = std::fs::metadata(&dbpath).unwrap();
+    println!("\nDatabase size: {} bytes", metadata.len());
+
     Ok(())
 }
