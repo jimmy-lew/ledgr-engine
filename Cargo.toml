@@ -19,6 +19,7 @@ tempfile    = "3"             # Disposable directories in tests
 # In practice you would also gate this at runtime via is_x86_feature_detected!.
 [profile.release]
 opt-level = 3
+debug = true
 
 [[bin]]
 name = "ldb"
