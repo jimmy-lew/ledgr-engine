@@ -34,7 +34,8 @@ use parking_lot::RwLock;
 use crate::error::{LedgerError, Result};
 use crate::hash_chain::ChainTip;
 use crate::models::{
-    AccountType, Direction, ExpenseSummary, JournalEntry, Leg, Transaction, TransactionType,
+    Account, AccountType, Direction, ExpenseSummary, JournalEntry, Leg, Transaction,
+    TransactionType,
 };
 use crate::simd_scan;
 use crate::storage::Storage;
@@ -45,12 +46,17 @@ use crate::wal::{Wal, WalEntry};
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct MemTable {
-    rows:       BTreeMap<(u64, u64), Transaction>,  // key = (timestamp, leg_id)
+    rows: BTreeMap<(u64, u64), Transaction>, // key = (timestamp, leg_id)
     size_bytes: usize,
 }
 
 impl MemTable {
-    fn new() -> Self { Self { rows: BTreeMap::new(), size_bytes: 0 } }
+    fn new() -> Self {
+        Self {
+            rows: BTreeMap::new(),
+            size_bytes: 0,
+        }
+    }
 
     fn insert(&mut self, tx: Transaction) {
         // Approximate size: fixed fields + description + hash
@@ -58,7 +64,9 @@ impl MemTable {
         self.rows.insert((tx.timestamp, tx.id), tx);
     }
 
-    fn needs_flush(&self) -> bool { self.size_bytes >= FLUSH_THRESHOLD }
+    fn needs_flush(&self) -> bool {
+        self.size_bytes >= FLUSH_THRESHOLD
+    }
 
     fn drain_sorted(&mut self) -> Vec<Transaction> {
         let rows: Vec<_> = self.rows.values().cloned().collect();
@@ -67,8 +75,12 @@ impl MemTable {
         rows
     }
 
-    fn iter(&self) -> impl Iterator<Item = &Transaction> { self.rows.values() }
-    fn is_empty(&self) -> bool { self.rows.is_empty() }
+    fn iter(&self) -> impl Iterator<Item = &Transaction> {
+        self.rows.values()
+    }
+    fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
 }
 
 const FLUSH_THRESHOLD: usize = 4 * 1024 * 1024;
@@ -78,10 +90,10 @@ const FLUSH_THRESHOLD: usize = 4 * 1024 * 1024;
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct Inner {
-    storage:    Storage,
-    wal:        Wal,
-    memtable:   MemTable,
-    chain_tip:  ChainTip,
+    storage: Storage,
+    wal: Wal,
+    memtable: MemTable,
+    chain_tip: ChainTip,
     /// Monotonically increasing counter shared between journal entry IDs
     /// and individual leg IDs (engine uses one AtomicU64 for both).
     next_entry_id: u64,
@@ -92,7 +104,7 @@ struct Inner {
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub struct LedgerEngine {
-    inner:   RwLock<Inner>,
+    inner: RwLock<Inner>,
     next_id: AtomicU64,
 }
 
@@ -101,10 +113,10 @@ impl LedgerEngine {
 
     pub fn open(data_path: impl AsRef<Path>) -> Result<Self> {
         let data_path = data_path.as_ref().to_path_buf();
-        let wal_path  = data_path.with_extension("wal");
+        let wal_path = data_path.with_extension("wal");
 
-        let mut storage  = Storage::open(&data_path)?;
-        let     wal      = Wal::open(&wal_path)?;
+        let mut storage = Storage::open(&data_path)?;
+        let wal = Wal::open(&wal_path)?;
 
         let recovered = wal.replay()?;
         let mut memtable = MemTable::new();
@@ -113,13 +125,15 @@ impl LedgerEngine {
         let chain_tip = ChainTip::new(storage.header.last_tx_hash);
 
         for tx in recovered {
-            if tx.id > max_id { max_id = tx.id; }
+            if tx.id > max_id {
+                max_id = tx.id;
+            }
             memtable.insert(tx);
         }
 
         Ok(Self {
             next_id: AtomicU64::new(max_id + 1),
-            inner:   RwLock::new(Inner {
+            inner: RwLock::new(Inner {
                 storage,
                 wal,
                 memtable,
@@ -178,7 +192,7 @@ impl LedgerEngine {
             }
         }
 
-        let now              = unix_now();
+        let now = unix_now();
         let journal_entry_id = {
             let id = inner.next_entry_id;
             inner.next_entry_id += 1;
@@ -190,19 +204,23 @@ impl LedgerEngine {
         // by the ChainTip (which reads from the MemTable's drain_sorted).
         // For WAL records we store the [0;32] placeholder; on replay the
         // engine re-inserts them into the MemTable and recomputes on flush.
-        let legs: Vec<Transaction> = entry.legs.iter().map(|leg| {
-            let leg_id = self.next_id.fetch_add(1, Ordering::Relaxed);
-            Transaction {
-                id:               leg_id,
-                journal_entry_id,
-                account_id:       leg.account_id,
-                amount:           leg.signed_amount(),
-                transaction_type: leg.direction,
-                timestamp:        now,
-                description:      entry.description.clone(),
-                tx_hash:          [0u8; 32],
-            }
-        }).collect();
+        let legs: Vec<Transaction> = entry
+            .legs
+            .iter()
+            .map(|leg| {
+                let leg_id = self.next_id.fetch_add(1, Ordering::Relaxed);
+                Transaction {
+                    id: leg_id,
+                    journal_entry_id,
+                    account_id: leg.account_id,
+                    amount: leg.signed_amount(),
+                    transaction_type: leg.direction,
+                    timestamp: now,
+                    description: entry.description.clone(),
+                    tx_hash: [0u8; 32],
+                }
+            })
+            .collect();
 
         // ── 4. Atomic WAL write (all legs in one record) ──────────────────
         let wal_entry = WalEntry {
@@ -215,7 +233,9 @@ impl LedgerEngine {
 
         // ── 5. Update account balances and populate MemTable ──────────────
         for leg in &legs {
-            inner.storage.update_account_balance(leg.account_id, leg.amount)?;
+            inner
+                .storage
+                .update_account_balance(leg.account_id, leg.amount)?;
             inner.memtable.insert(leg.clone());
         }
 
@@ -239,15 +259,15 @@ impl LedgerEngine {
     /// Returns the `journal_entry_id`.
     pub fn record_simple_entry(
         &self,
-        debit_account:  u64,
+        debit_account: u64,
         credit_account: u64,
-        amount_cents:   u64,
-        description:    &str,
+        amount_cents: u64,
+        description: &str,
     ) -> Result<u64> {
         self.record_journal_entry(JournalEntry::new(
             description,
             vec![
-                Leg::debit(debit_account,  amount_cents),
+                Leg::debit(debit_account, amount_cents),
                 Leg::credit(credit_account, amount_cents),
             ],
         ))
@@ -285,7 +305,7 @@ impl LedgerEngine {
             all_amounts.push(tx.amount);
         }
 
-        let net         = simd_scan::simd_sum_i64(&all_amounts);
+        let net = simd_scan::simd_sum_i64(&all_amounts);
         let balance_sum = inner.storage.account_balance_sum();
 
         if balance_sum != net {
@@ -306,7 +326,7 @@ impl LedgerEngine {
         );
 
         // ── Phase 2: Hash chain walk ───────────────────────────────────────
-        let mut prev_hash  = inner.storage.header.genesis_hash;
+        let mut prev_hash = inner.storage.header.genesis_hash;
         let mut global_row = 0u64;
 
         for seg in inner.storage.segments.clone() {
@@ -315,19 +335,17 @@ impl LedgerEngine {
                 let expected = crate::hash_chain::compute_tx_hash(tx, &prev_hash);
                 if expected != tx.tx_hash {
                     return Err(LedgerError::HashChainViolation {
-                        row:      global_row,
+                        row: global_row,
                         expected: hex::encode(expected),
-                        actual:   hex::encode(tx.tx_hash),
+                        actual: hex::encode(tx.tx_hash),
                     });
                 }
-                prev_hash  = tx.tx_hash;
+                prev_hash = tx.tx_hash;
                 global_row += 1;
             }
         }
 
-        println!(
-            "[validate] Phase 2 ✓  Hash chain intact across {global_row} flushed rows"
-        );
+        println!("[validate] Phase 2 ✓  Hash chain intact across {global_row} flushed rows");
         Ok(())
     }
 
@@ -365,27 +383,33 @@ impl LedgerEngine {
             }
 
             let timestamps = inner.storage.read_timestamps(seg)?;
-            let amounts    = inner.storage.read_amounts(seg)?;
-            let tx_types   = inner.storage.read_tx_types(seg)?;
+            let amounts = inner.storage.read_amounts(seg)?;
+            let tx_types = inner.storage.read_tx_types(seg)?;
 
             let (filt_amounts, filt_types): (Vec<i64>, Vec<u8>) = timestamps
-                .iter().zip(amounts.iter()).zip(tx_types.iter())
+                .iter()
+                .zip(amounts.iter())
+                .zip(tx_types.iter())
                 .filter(|((&ts, _), _)| ts >= start_ts && ts <= end_ts)
                 .map(|((_, &amt), &t)| (amt, t))
                 .unzip();
 
-            if filt_amounts.is_empty() { continue; }
+            if filt_amounts.is_empty() {
+                continue;
+            }
 
             let (d, c) = simd_scan::simd_sum_by_type(&filt_amounts, &filt_types);
-            summary.total_debits  += d;
+            summary.total_debits += d;
             summary.total_credits += c;
-            summary.row_count     += filt_amounts.len() as u64;
+            summary.row_count += filt_amounts.len() as u64;
         }
 
         for tx in inner.memtable.iter() {
-            if tx.timestamp < start_ts || tx.timestamp > end_ts { continue; }
+            if tx.timestamp < start_ts || tx.timestamp > end_ts {
+                continue;
+            }
             match tx.transaction_type {
-                Direction::Debit  => summary.total_debits  += tx.amount,
+                Direction::Debit => summary.total_debits += tx.amount,
                 Direction::Credit => summary.total_credits += tx.amount,
             }
             summary.row_count += 1;
@@ -393,6 +417,53 @@ impl LedgerEngine {
 
         summary.net = summary.total_debits + summary.total_credits;
         Ok(summary)
+    }
+
+    // ── Read / query APIs ──────────────────────────────────────────────────
+
+    /// Return all accounts sorted by their numeric ID.
+    pub fn list_accounts(&self) -> Vec<Account> {
+        let inner = self.inner.read();
+        let mut accounts: Vec<Account> = inner
+            .storage
+            .accounts
+            .values()
+            .map(|(_, a)| a.clone())
+            .collect();
+        accounts.sort_by_key(|a| a.id);
+        accounts
+    }
+
+    /// Return every transaction leg across all flushed segments *and* the
+    /// MemTable, sorted globally by (timestamp, leg_id).
+    ///
+    /// Legs from the same `journal_entry_id` are naturally adjacent because
+    /// they share the same timestamp and were inserted together.
+    pub fn list_all_transactions(&self) -> Result<Vec<Transaction>> {
+        let mut inner = self.inner.write();
+
+        let mut all: Vec<Transaction> = Vec::new();
+        for seg in inner.storage.segments.clone() {
+            all.extend(inner.storage.read_all_transactions(&seg)?);
+        }
+        for tx in inner.memtable.iter() {
+            all.push(tx.clone());
+        }
+        Ok(all)
+    }
+
+    /// Return all transaction legs grouped into journal entries.
+    ///
+    /// Each inner `Vec<Transaction>` contains all legs of one entry;
+    /// the outer `Vec` is ordered by `journal_entry_id`.
+    pub fn list_journal_entries(&self) -> Result<Vec<Vec<Transaction>>> {
+        use std::collections::BTreeMap;
+        let legs = self.list_all_transactions()?;
+        let mut map: BTreeMap<u64, Vec<Transaction>> = BTreeMap::new();
+        for leg in legs {
+            map.entry(leg.journal_entry_id).or_default().push(leg);
+        }
+        Ok(map.into_values().collect())
     }
 
     // ── Force flush ────────────────────────────────────────────────────────
@@ -409,11 +480,13 @@ impl LedgerEngine {
 
     fn do_flush(inner: &mut Inner) -> Result<()> {
         let rows = inner.memtable.drain_sorted();
-        let n    = rows.len();
+        let n = rows.len();
         inner.storage.flush_segment(rows, &mut inner.chain_tip)?;
         inner.wal.truncate()?;
-        println!("[flush] ✓  {n} legs → segment {}",
-            inner.storage.segments.len() - 1);
+        println!(
+            "[flush] ✓  {n} legs → segment {}",
+            inner.storage.segments.len() - 1
+        );
         Ok(())
     }
 }
