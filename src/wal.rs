@@ -74,7 +74,7 @@ impl Wal {
         let byte_offset = file.metadata()?.len();
         Ok(Self {
             path,
-            writer: BufWriter::new(file),
+            writer: BufWriter::with_capacity(1024 * 1024, file), // 1MB buffer
             byte_offset,
         })
     }
@@ -94,10 +94,15 @@ impl Wal {
         self.writer.write_u32::<LE>(crc)?;
         self.writer.write_u32::<LE>(payload.len() as u32)?;
         self.writer.write_all(&payload)?;
-        self.writer.flush()?;
-        self.writer.get_ref().sync_all()?;
 
         self.byte_offset += 1 + 4 + 4 + payload.len() as u64;
+        Ok(())
+    }
+
+    /// Force sync all pending writes to durable storage.
+    /// Call this periodically (e.g., at flush time) rather than after every entry.
+    pub fn sync(&mut self) -> Result<()> {
+        self.writer.get_ref().sync_all()?;
         Ok(())
     }
 
