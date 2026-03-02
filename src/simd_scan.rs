@@ -220,11 +220,14 @@ unsafe fn avx2_sum_by_type(amounts: &[i64], tx_types: &[u8]) -> (i64, i64) {
     for (a, t) in amt_chunks.zip(type_chunks) {
         let v = _mm256_loadu_si256(a.as_ptr() as *const __m256i);
 
-        // Build 256-bit masks: -1 (0xFFFF…) where condition is true, 0 otherwise.
-        // We broadcast each type byte to a 64-bit mask using set_epi64x.
-        let types = _mm_loadu_si128(t.as_ptr() as *const __m128i);
-        let cmp = _mm_cmpeq_epi8(types, _mm_setzero_si128());
-        let debit_mask = _mm256_cvtepi8_epi64(cmp);
+        // tx_types are 0 (debit) or 1 (credit)
+        // Subtract from 0: if t[i]==0 → 0-0 = 0; if t[i]==1 → 0-1 = -1 (all 1s bits)
+        // This gives us a mask directly: 0 for credit, -1 for debit
+        let types_i64 = _mm_set_epi64x(t[3] as i64, t[2] as i64, t[1] as i64, t[0] as i64);
+        let zero = _mm256_setzero_si256();
+        let debit_mask = _mm256_sub_epi64(zero, _mm256_cmpeq_epi64(types_i64, zero));
+
+        // XOR with all-1s flips: -1 → 0, 0 → -1 (debit mask → credit mask)
         let credit_mask = _mm256_xor_si256(debit_mask, _mm256_set1_epi64x(-1));
 
         // AND amount with mask: zeroes out amounts for non-matching rows.
@@ -322,8 +325,8 @@ unsafe fn neon_sum_by_type(amounts: &[i64], tx_types: &[u8]) -> (i64, i64) {
         let (d0, c0) = if t[0] == 0 { (a0, 0) } else { (0, a0) };
         let (d1, c1) = if t[1] == 0 { (a1, 0) } else { (0, a1) };
 
-        let debit_lanes = vdupq_n_s64(d0 + d1);
-        let credit_lanes = vdupq_n_s64(c0 + c1);
+        let debit_lanes = vcombine_s64(vcreate_s64(d0 as u64), vcreate_s64(d1 as u64));
+        let credit_lanes = vcombine_s64(vcreate_s64(c0 as u64), vcreate_s64(c1 as u64));
 
         debit_acc = vaddq_s64(debit_acc, debit_lanes);
         credit_acc = vaddq_s64(credit_acc, credit_lanes);
