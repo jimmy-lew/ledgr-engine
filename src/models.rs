@@ -23,17 +23,24 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum Direction {
-    Debit  = 0,
+    Debit = 0,
     Credit = 1,
 }
 
 impl Direction {
     pub fn from_u8(v: u8) -> Option<Self> {
-        match v { 0 => Some(Self::Debit), 1 => Some(Self::Credit), _ => None }
+        match v {
+            0 => Some(Self::Debit),
+            1 => Some(Self::Credit),
+            _ => None,
+        }
     }
     /// Signed multiplier: debits are stored as negative amounts.
     pub fn sign(self) -> i64 {
-        match self { Self::Debit => -1, Self::Credit => 1 }
+        match self {
+            Self::Debit => -1,
+            Self::Credit => 1,
+        }
     }
 }
 
@@ -43,19 +50,22 @@ pub type TransactionType = Direction;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum AccountType {
-    Asset     = 0,
+    Asset = 0,
     Liability = 1,
-    Equity    = 2,
-    Revenue   = 3,
-    Expense   = 4,
+    Equity = 2,
+    Revenue = 3,
+    Expense = 4,
 }
 
 impl AccountType {
     pub fn from_u8(v: u8) -> Option<Self> {
         match v {
-            0 => Some(Self::Asset), 1 => Some(Self::Liability),
-            2 => Some(Self::Equity), 3 => Some(Self::Revenue),
-            4 => Some(Self::Expense), _ => None,
+            0 => Some(Self::Asset),
+            1 => Some(Self::Liability),
+            2 => Some(Self::Equity),
+            3 => Some(Self::Revenue),
+            4 => Some(Self::Expense),
+            _ => None,
         }
     }
 }
@@ -71,19 +81,27 @@ impl AccountType {
 #[derive(Debug, Clone)]
 pub struct Leg {
     pub account_id: u64,
-    pub amount:     u64,       // always positive; sign comes from `direction`
-    pub direction:  Direction,
+    pub amount: u64, // always positive; sign comes from `direction`
+    pub direction: Direction,
 }
 
 impl Leg {
     /// Convenience constructor for a debit leg.
     pub fn debit(account_id: u64, amount_cents: u64) -> Self {
-        Self { account_id, amount: amount_cents, direction: Direction::Debit }
+        Self {
+            account_id,
+            amount: amount_cents,
+            direction: Direction::Debit,
+        }
     }
 
     /// Convenience constructor for a credit leg.
     pub fn credit(account_id: u64, amount_cents: u64) -> Self {
-        Self { account_id, amount: amount_cents, direction: Direction::Credit }
+        Self {
+            account_id,
+            amount: amount_cents,
+            direction: Direction::Credit,
+        }
     }
 
     /// The signed amount as stored in the `amount` column.
@@ -127,7 +145,10 @@ pub struct JournalEntry {
 
 impl JournalEntry {
     pub fn new(description: impl Into<String>, legs: Vec<Leg>) -> Self {
-        Self { description: description.into(), legs }
+        Self {
+            description: description.into(),
+            legs,
+        }
     }
 
     /// Validate the accounting invariant without touching any I/O.
@@ -148,14 +169,20 @@ impl JournalEntry {
 
         let net: i64 = self.legs.iter().map(|l| l.signed_amount()).sum();
         if net != 0 {
-            let total_debits:  u64 = self.legs.iter()
+            let total_debits: u64 = self
+                .legs
+                .iter()
                 .filter(|l| l.direction == Direction::Debit)
-                .map(|l| l.amount).sum();
-            let total_credits: u64 = self.legs.iter()
+                .map(|l| l.amount)
+                .sum();
+            let total_credits: u64 = self
+                .legs
+                .iter()
                 .filter(|l| l.direction == Direction::Credit)
-                .map(|l| l.amount).sum();
+                .map(|l| l.amount)
+                .sum();
             return Err(LedgerError::JournalNotBalanced {
-                debits:  total_debits,
+                debits: total_debits,
                 credits: total_credits,
             });
         }
@@ -175,20 +202,20 @@ impl JournalEntry {
 #[derive(Debug, Clone)]
 pub struct Transaction {
     /// Globally unique leg ID (monotonically increasing).
-    pub id:               u64,
+    pub id: u64,
     /// Groups all legs of the same `JournalEntry` together.
     pub journal_entry_id: u64,
-    pub account_id:       u64,
+    pub account_id: u64,
     /// Signed cents: negative for debits, positive for credits.
     /// Storing signed values means `∑ all amounts = 0` for any balanced ledger.
-    pub amount:           i64,
+    pub amount: i64,
     pub transaction_type: Direction,
-    pub timestamp:        u64,
-    pub description:      String,
-    /// SHA-256( leg_fields ‖ prev_tx_hash ).  Chains across ALL legs in
+    pub timestamp: u64,
+    pub description: String,
+    /// SHA-256( leg_fields ‖ prev_tx_hash ). Chains across ALL legs in
     /// insertion order, not per-journal-entry, so the hash chain covers the
     /// entire history.
-    pub tx_hash:          [u8; 32],
+    pub tx_hash: [u8; 32],
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -198,13 +225,13 @@ pub struct Transaction {
 /// A ledger account.
 #[derive(Debug, Clone)]
 pub struct Account {
-    pub id:         u64,
-    pub name:       String,
-    pub kind:       AccountType,
+    pub id: u64,
+    pub name: String,
+    pub kind: AccountType,
     pub created_at: u64,
     /// Running signed balance in cents.
     /// ∑(all account.balance) must equal 0 for a balanced ledger.
-    pub balance:    i64,
+    pub balance: i64,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -214,9 +241,9 @@ pub struct Account {
 /// Result of `get_expense_summary`.
 #[derive(Debug, Default)]
 pub struct ExpenseSummary {
-    pub total_debits:     i64,
-    pub total_credits:    i64,
-    pub net:              i64,
-    pub row_count:        u64,
+    pub total_debits: i64,
+    pub total_credits: i64,
+    pub net: i64,
+    pub row_count: u64,
     pub segments_skipped: u64,
 }

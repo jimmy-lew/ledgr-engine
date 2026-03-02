@@ -5,22 +5,22 @@
 //! ## File Header (512 bytes, always at offset 0)
 //!
 //! ```text
-//! Offset  Size  Field
-//! ──────  ────  ──────────────────────────────────────────────────────
-//! 0x000   4     Magic bytes: "LDGR"
-//! 0x004   1     Version: 0x01
-//! 0x005   3     Reserved (zero)
-//! 0x008   8     accounts_count         u64 – active account slots
-//! 0x010   8     segment_count          u64 – number of written segments
-//! 0x018   8     segments_end_offset    u64 – byte where last segment ends
-//!                                           (= start of sparse index)
-//! 0x020   8     sparse_index_count     u64 – number of sparse entries
-//! 0x028   8     total_tx_count         u64 – grand total rows across all segs
-//! 0x030  32     genesis_hash           [u8;32] – prev pointer for row 0
-//! 0x050  32     last_tx_hash           [u8;32] – hash of most-recent tx
-//! 0x070   4     header_crc32           CRC32 over bytes [0x000..0x070)
-//! 0x074  140    padding (zeroes)
-//! ──────  ────  Total = 512 bytes  (0x200)
+//! Offset   Size   Field
+//! ──────  ──────  ──────────────────────────────────────────────────────
+//! 0x000      4    Magic bytes: "LDGR"
+//! 0x004      1    Version: 0x01
+//! 0x005      3    Reserved (zero)
+//! 0x008      8    accounts_count         u64 – active account slots
+//! 0x010      8    segment_count          u64 – number of written segments
+//! 0x018      8    segments_end_offset    u64 – byte where last segment ends
+//!                                          (= start of sparse index)
+//! 0x020      8    sparse_index_count     u64 – number of sparse entries
+//! 0x028      8    total_tx_count         u64 – grand total rows across all segs
+//! 0x030     32    genesis_hash           [u8;32] – prev pointer for row 0
+//! 0x050     32    last_tx_hash           [u8;32] – hash of most-recent tx
+//! 0x070      4    header_crc32           CRC32 over bytes [0x000..0x070)
+//! 0x074    140    padding (zeroes)
+//! ──────  ─────   Total = 512 bytes  (0x200)
 //! ```
 //!
 //! ## Accounts Region  (offsets 512 … 131 583)
@@ -70,7 +70,7 @@
 //! |  4  | timestamp        | None      | 8 bytes      |
 //! |  5  | description      | None      | 4+N bytes    |
 //! |  6  | tx_hash          | None      | 32 bytes     |
-//! |  7  | journal_entry_id | None      | 8 bytes      ← groups legs together
+//! |  7  | journal_entry_id | None      | 8 bytes      | ← groups legs together
 //!
 //! ## Sparse Timestamp Index (at `segments_end_offset`)
 //!

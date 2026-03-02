@@ -15,10 +15,18 @@ pub enum LedgerError {
     HeaderChecksumMismatch { stored: u32, computed: u32 },
 
     #[error("Segment {seq} CRC mismatch: stored={stored:#010x} computed={computed:#010x}")]
-    SegmentChecksumMismatch { seq: u64, stored: u32, computed: u32 },
+    SegmentChecksumMismatch {
+        seq: u64,
+        stored: u32,
+        computed: u32,
+    },
 
     #[error("Hash chain broken at global row {row}: expected {expected} got {actual}")]
-    HashChainViolation { row: u64, expected: String, actual: String },
+    HashChainViolation {
+        row: u64,
+        expected: String,
+        actual: String,
+    },
 
     #[error("Ledger imbalanced: SIMD net amount sum = {net} cents (expected 0)")]
     ImbalancedLedger { net: i64 },

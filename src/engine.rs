@@ -35,7 +35,6 @@ use crate::error::{LedgerError, Result};
 use crate::hash_chain::ChainTip;
 use crate::models::{
     Account, AccountType, Direction, ExpenseSummary, JournalEntry, Leg, Transaction,
-    TransactionType,
 };
 use crate::simd_scan;
 use crate::storage::Storage;
@@ -115,7 +114,7 @@ impl LedgerEngine {
         let data_path = data_path.as_ref().to_path_buf();
         let wal_path = data_path.with_extension("wal");
 
-        let mut storage = Storage::open(&data_path)?;
+        let storage = Storage::open(&data_path)?;
         let wal = Wal::open(&wal_path)?;
 
         let recovered = wal.replay()?;
@@ -186,7 +185,7 @@ impl LedgerEngine {
         let mut inner = self.inner.write();
 
         // ── 2. Validate all referenced accounts exist ─────────────────────
-        for (i, leg) in entry.legs.iter().enumerate() {
+        for (_i, leg) in entry.legs.iter().enumerate() {
             if !inner.storage.accounts.contains_key(&leg.account_id) {
                 return Err(LedgerError::UnknownAccount(leg.account_id));
             }

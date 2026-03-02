@@ -32,15 +32,15 @@
 //! Because transactions are flushed in timestamp order (MemTable is sorted
 //! before flushing), the sparse index is always in ascending order.
 
-use std::io::{Read, Seek, SeekFrom, Write};
-use byteorder::{LE, ReadBytesExt, WriteBytesExt};
 use crate::error::Result;
+use byteorder::{ReadBytesExt, WriteBytesExt, LE};
+use std::io::{Read, Seek, SeekFrom, Write};
 
 /// One sparse index entry (16 bytes on disk).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SparseEntry {
     /// The timestamp of the globally `global_row_idx`-th transaction.
-    pub timestamp:      u64,
+    pub timestamp: u64,
     /// Zero-based index across all segments (not per-segment).
     pub global_row_idx: u64,
 }
@@ -55,7 +55,11 @@ pub struct SparseIndex {
 }
 
 impl SparseIndex {
-    pub fn new() -> Self { Self { entries: Vec::new() } }
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
 
     /// Build a fresh sparse index from an ordered slice of `(timestamp, global_row_idx)`.
     ///
@@ -66,7 +70,10 @@ impl SparseIndex {
             .iter()
             .enumerate()
             .filter(|(i, _)| (*i as u64) % SPARSE_FACTOR == 0)
-            .map(|(_, &(ts, idx))| SparseEntry { timestamp: ts, global_row_idx: idx })
+            .map(|(_, &(ts, idx))| SparseEntry {
+                timestamp: ts,
+                global_row_idx: idx,
+            })
             .collect();
         Self { entries }
     }
@@ -93,9 +100,12 @@ impl SparseIndex {
         let n = stored_count as usize;
         let mut entries = Vec::with_capacity(n);
         for _ in 0..n {
-            let timestamp      = r.read_u64::<LE>()?;
+            let timestamp = r.read_u64::<LE>()?;
             let global_row_idx = r.read_u64::<LE>()?;
-            entries.push(SparseEntry { timestamp, global_row_idx });
+            entries.push(SparseEntry {
+                timestamp,
+                global_row_idx,
+            });
         }
         Ok(Self { entries })
     }
@@ -111,11 +121,16 @@ impl SparseIndex {
     /// ## Complexity
     /// O(log n) binary search over the sparse entries.
     pub fn lower_bound_row(&self, start_ts: u64) -> u64 {
-        if self.entries.is_empty() { return 0; }
+        if self.entries.is_empty() {
+            return 0;
+        }
 
         // Find the last sparse entry with timestamp <= start_ts.
         // That entry's global_row_idx is a safe starting point.
-        match self.entries.binary_search_by_key(&start_ts, |e| e.timestamp) {
+        match self
+            .entries
+            .binary_search_by_key(&start_ts, |e| e.timestamp)
+        {
             Ok(pos) => {
                 // Exact match – use this entry directly
                 self.entries[pos].global_row_idx
@@ -138,19 +153,27 @@ impl SparseIndex {
     ///
     /// Used to bound the upper end of a range scan.
     pub fn upper_bound_row(&self, end_ts: u64) -> Option<u64> {
-        if self.entries.is_empty() { return None; }
+        if self.entries.is_empty() {
+            return None;
+        }
         let pos = match self.entries.binary_search_by_key(&end_ts, |e| e.timestamp) {
-            Ok(pos)  => pos,
+            Ok(pos) => pos,
             Err(pos) => {
-                if pos == 0 { return None; }  // all entries after end_ts
+                if pos == 0 {
+                    return None;
+                } // all entries after end_ts
                 pos - 1
             }
         };
         Some(self.entries[pos].global_row_idx + SPARSE_FACTOR)
     }
 
-    pub fn len(&self) -> usize { self.entries.len() }
-    pub fn is_empty(&self) -> bool { self.entries.is_empty() }
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 
     // ── Merge (used when new rows are appended) ───────────────────────────
 
@@ -160,7 +183,10 @@ impl SparseIndex {
     pub fn extend(&mut self, new_rows: &[(u64, u64)]) {
         for (i, &(ts, global_idx)) in new_rows.iter().enumerate() {
             if global_idx % SPARSE_FACTOR == 0 || (i == 0 && self.entries.is_empty()) {
-                self.entries.push(SparseEntry { timestamp: ts, global_row_idx: global_idx });
+                self.entries.push(SparseEntry {
+                    timestamp: ts,
+                    global_row_idx: global_idx,
+                });
             }
         }
     }
@@ -219,8 +245,8 @@ mod sparse_tests {
     fn roundtrip_via_cursor() {
         use std::io::Cursor;
         let (idx, _) = build_test_index(192);
-        let mut buf  = Cursor::new(Vec::new());
-        let n_bytes  = idx.write_to(&mut buf).unwrap();
+        let mut buf = Cursor::new(Vec::new());
+        let n_bytes = idx.write_to(&mut buf).unwrap();
         assert_eq!(n_bytes, 8 + idx.len() * 16);
 
         let restored = SparseIndex::read_from(&mut buf, 0, idx.len() as u64).unwrap();

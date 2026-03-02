@@ -27,12 +27,12 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-use byteorder::{LE, ReadBytesExt, WriteBytesExt};
+use byteorder::{ReadBytesExt, WriteBytesExt, LE};
 
 use crate::error::{LedgerError, Result};
 use crate::file_format::{
-    self, col, enc, ColumnMeta, FileHeader, SegmentHeader, FILE_HEADER_SIZE,
-    MAX_ACCOUNTS, NUM_TX_COLUMNS, ACCOUNT_RECORD_SIZE,
+    self, col, enc, ColumnMeta, FileHeader, SegmentHeader, ACCOUNT_RECORD_SIZE, FILE_HEADER_SIZE,
+    MAX_ACCOUNTS, NUM_TX_COLUMNS,
 };
 use crate::hash_chain::{self, ChainTip};
 use crate::models::{Account, AccountType, Transaction, TransactionType};
@@ -45,10 +45,10 @@ use crate::sparse_index::SparseIndex;
 /// Everything we need to know about a written segment without re-reading it.
 #[derive(Debug, Clone)]
 pub struct SegmentMeta {
-    pub seq:                u64,
-    pub header:             SegmentHeader,
+    pub seq: u64,
+    pub header: SegmentHeader,
     /// Absolute file offset at which the SegmentHeader begins.
-    pub file_offset:        u64,
+    pub file_offset: u64,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -56,11 +56,11 @@ pub struct SegmentMeta {
 // ──────────────────────────────────────────────────────────────────────────────
 
 pub struct Storage {
-    file:          File,
-    pub header:    FileHeader,
-    pub segments:  Vec<SegmentMeta>,
-    pub accounts:  HashMap<u64, (usize, Account)>, // id → (slot_index, account)
-    pub sparse:    SparseIndex,
+    file: File,
+    pub header: FileHeader,
+    pub segments: Vec<SegmentMeta>,
+    pub accounts: HashMap<u64, (usize, Account)>, // id → (slot_index, account)
+    pub sparse: SparseIndex,
 }
 
 impl Storage {
@@ -71,15 +71,17 @@ impl Storage {
         let is_new = !path.exists();
 
         let file = OpenOptions::new()
-            .read(true).write(true).create(true)
+            .read(true)
+            .write(true)
+            .create(true)
             .open(path)?;
 
         let mut storage = Self {
             file,
-            header:   FileHeader::default(),
+            header: FileHeader::default(),
             segments: Vec::new(),
             accounts: HashMap::new(),
-            sparse:   SparseIndex::new(),
+            sparse: SparseIndex::new(),
         };
 
         if is_new {
@@ -157,17 +159,15 @@ impl Storage {
         // the same ID space via the engine's AtomicU64 counter).
         let id = (slot + 1) as u64;
 
-        let account = Account { id, name: name.to_string(), kind, created_at, balance: 0 };
-
-        file_format::write_account_slot(
-            &mut self.file,
-            slot,
+        let account = Account {
             id,
-            name,
-            kind as u8,
+            name: name.to_string(),
+            kind,
             created_at,
-            0,
-        )?;
+            balance: 0,
+        };
+
+        file_format::write_account_slot(&mut self.file, slot, id, name, kind as u8, created_at, 0)?;
 
         self.header.accounts_count += 1;
         self.header.write_to(&mut self.file)?;
@@ -179,7 +179,9 @@ impl Storage {
 
     /// Update the stored balance for an account (called after each tx).
     pub fn update_account_balance(&mut self, account_id: u64, delta: i64) -> Result<()> {
-        let (slot, acct) = self.accounts.get_mut(&account_id)
+        let (slot, acct) = self
+            .accounts
+            .get_mut(&account_id)
             .ok_or(LedgerError::UnknownAccount(account_id))?;
         acct.balance += delta;
         let balance = acct.balance;
@@ -204,13 +206,15 @@ impl Storage {
     /// each row's `tx_hash` field is filled in here.
     pub fn flush_segment(
         &mut self,
-        mut rows:      Vec<Transaction>,
-        chain_tip:     &mut ChainTip,
+        mut rows: Vec<Transaction>,
+        chain_tip: &mut ChainTip,
     ) -> Result<()> {
-        if rows.is_empty() { return Err(LedgerError::EmptyFlush); }
+        if rows.is_empty() {
+            return Err(LedgerError::EmptyFlush);
+        }
 
         let first_row_global = self.header.total_tx_count;
-        let row_count        = rows.len() as u64;
+        let row_count = rows.len() as u64;
 
         // ── Assign hashes ──────────────────────────────────────────────────
         for tx in rows.iter_mut() {
@@ -222,35 +226,43 @@ impl Storage {
         // segment header (which contains their absolute offsets), so we
         // serialise all columns first, then emit the header.
 
-        let col_id    = serialise_u64_col(rows.iter().map(|r| r.id));
-        let col_acct  = serialise_u64_col(rows.iter().map(|r| r.account_id));
-        let col_amt   = serialise_i64_col(rows.iter().map(|r| r.amount));
-        let (col_type, type_enc) = serialise_dict_u8_col(rows.iter().map(|r| r.transaction_type as u8));
-        let col_ts    = serialise_u64_col(rows.iter().map(|r| r.timestamp));
-        let col_desc  = serialise_string_col(rows.iter().map(|r| r.description.as_str()));
-        let col_hash  = serialise_hash_col(rows.iter().map(|r| &r.tx_hash));
+        let col_id = serialise_u64_col(rows.iter().map(|r| r.id));
+        let col_acct = serialise_u64_col(rows.iter().map(|r| r.account_id));
+        let col_amt = serialise_i64_col(rows.iter().map(|r| r.amount));
+        let (col_type, type_enc) =
+            serialise_dict_u8_col(rows.iter().map(|r| r.transaction_type as u8));
+        let col_ts = serialise_u64_col(rows.iter().map(|r| r.timestamp));
+        let col_desc = serialise_string_col(rows.iter().map(|r| r.description.as_str()));
+        let col_hash = serialise_hash_col(rows.iter().map(|r| &r.tx_hash));
         let col_entry = serialise_u64_col(rows.iter().map(|r| r.journal_entry_id));
 
         let col_data: [&[u8]; NUM_TX_COLUMNS] = [
             &col_id, &col_acct, &col_amt, &col_type, &col_ts, &col_desc, &col_hash, &col_entry,
         ];
         let encodings: [u8; NUM_TX_COLUMNS] = [
-            enc::NONE, enc::NONE, enc::NONE, type_enc, enc::NONE, enc::NONE, enc::NONE, enc::NONE,
+            enc::NONE,
+            enc::NONE,
+            enc::NONE,
+            type_enc,
+            enc::NONE,
+            enc::NONE,
+            enc::NONE,
+            enc::NONE,
         ];
 
         // ── Compute segment file position ──────────────────────────────────
         // The new segment is placed at segments_end_offset (just past the
         // current sparse index, or at SEGMENTS_BASE_OFFSET for the first seg).
         let seg_file_offset = self.header.segments_end_offset;
-        let data_start      = seg_file_offset + file_format::SEGMENT_HEADER_SIZE as u64;
+        let data_start = seg_file_offset + file_format::SEGMENT_HEADER_SIZE as u64;
 
         // ── Compute column offsets (absolute file positions) ───────────────
         let mut columns = [ColumnMeta::default(); NUM_TX_COLUMNS];
-        let mut cursor  = data_start;
+        let mut cursor = data_start;
         for i in 0..NUM_TX_COLUMNS {
             columns[i] = ColumnMeta {
-                offset:   cursor,
-                length:   col_data[i].len() as u64,
+                offset: cursor,
+                length: col_data[i].len() as u64,
                 encoding: encodings[i],
             };
             cursor += col_data[i].len() as u64;
@@ -258,14 +270,16 @@ impl Storage {
 
         // ── CRC32 over all column data ─────────────────────────────────────
         let mut all_data = Vec::new();
-        for &block in &col_data { all_data.extend_from_slice(block); }
+        for &block in &col_data {
+            all_data.extend_from_slice(block);
+        }
         let data_crc32 = SegmentHeader::crc32_of(&all_data);
 
         let min_ts = rows.iter().map(|r| r.timestamp).min().unwrap();
         let max_ts = rows.iter().map(|r| r.timestamp).max().unwrap();
 
         let seg_hdr = SegmentHeader {
-            magic:               *b"SEGM",
+            magic: *b"SEGM",
             row_count,
             min_ts,
             max_ts,
@@ -277,12 +291,15 @@ impl Storage {
         // ── Write: segment header + column blocks ──────────────────────────
         self.file.seek(SeekFrom::Start(seg_file_offset))?;
         seg_hdr.write_to(&mut self.file)?;
-        for &block in &col_data { self.file.write_all(block)?; }
+        for &block in &col_data {
+            self.file.write_all(block)?;
+        }
 
         let new_segments_end = cursor; // = seg_file_offset + seg_header + all data
 
         // ── Rebuild and write sparse index ─────────────────────────────────
-        let new_row_pairs: Vec<(u64, u64)> = rows.iter()
+        let new_row_pairs: Vec<(u64, u64)> = rows
+            .iter()
             .enumerate()
             .map(|(i, r)| (r.timestamp, first_row_global + i as u64))
             .collect();
@@ -294,11 +311,11 @@ impl Storage {
         self.file.set_len(new_file_len)?;
 
         // ── Update + rewrite file header (logical commit) ─────────────────
-        self.header.segment_count       += 1;
-        self.header.segments_end_offset  = new_segments_end;
-        self.header.sparse_index_count   = self.sparse.len() as u64;
-        self.header.total_tx_count      += row_count;
-        self.header.last_tx_hash         = chain_tip.last_hash;
+        self.header.segment_count += 1;
+        self.header.segments_end_offset = new_segments_end;
+        self.header.sparse_index_count = self.sparse.len() as u64;
+        self.header.total_tx_count += row_count;
+        self.header.last_tx_hash = chain_tip.last_hash;
         self.header.write_to(&mut self.file)?;
         self.file.sync_all()?;
 
@@ -327,7 +344,9 @@ impl Storage {
         self.file.seek(SeekFrom::Start(col.offset))?;
         let n = meta.header.row_count as usize;
         let mut out = Vec::with_capacity(n);
-        for _ in 0..n { out.push(self.file.read_i64::<LE>()?); }
+        for _ in 0..n {
+            out.push(self.file.read_i64::<LE>()?);
+        }
         Ok(out)
     }
 
@@ -336,7 +355,7 @@ impl Storage {
         let col = &meta.header.columns[col::TYPE];
         self.file.seek(SeekFrom::Start(col.offset))?;
         let dict_size = self.file.read_u8()? as usize;
-        let mut dict  = vec![0u8; dict_size];
+        let mut dict = vec![0u8; dict_size];
         self.file.read_exact(&mut dict)?;
         let n = meta.header.row_count as usize;
         let mut codes = vec![0u8; n];
@@ -351,7 +370,9 @@ impl Storage {
         self.file.seek(SeekFrom::Start(col.offset))?;
         let n = meta.header.row_count as usize;
         let mut out = Vec::with_capacity(n);
-        for _ in 0..n { out.push(self.file.read_u64::<LE>()?); }
+        for _ in 0..n {
+            out.push(self.file.read_u64::<LE>()?);
+        }
         Ok(out)
     }
 
@@ -377,26 +398,33 @@ impl Storage {
 
         // Load each column individually (column-sequential access pattern)
         let ids = {
-            self.file.seek(SeekFrom::Start(meta.header.columns[col::ID].offset))?;
+            self.file
+                .seek(SeekFrom::Start(meta.header.columns[col::ID].offset))?;
             let mut v = Vec::with_capacity(n);
-            for _ in 0..n { v.push(self.file.read_u64::<LE>()?); }
+            for _ in 0..n {
+                v.push(self.file.read_u64::<LE>()?);
+            }
             v
         };
         let accts = {
-            self.file.seek(SeekFrom::Start(meta.header.columns[col::ACCT].offset))?;
+            self.file
+                .seek(SeekFrom::Start(meta.header.columns[col::ACCT].offset))?;
             let mut v = Vec::with_capacity(n);
-            for _ in 0..n { v.push(self.file.read_u64::<LE>()?); }
+            for _ in 0..n {
+                v.push(self.file.read_u64::<LE>()?);
+            }
             v
         };
         let amts = self.read_amounts(meta)?;
         let types = self.read_tx_types(meta)?;
-        let ts    = self.read_timestamps(meta)?;
+        let ts = self.read_timestamps(meta)?;
 
         // Descriptions (variable-length)
-        self.file.seek(SeekFrom::Start(meta.header.columns[col::DESC].offset))?;
+        self.file
+            .seek(SeekFrom::Start(meta.header.columns[col::DESC].offset))?;
         let mut descs = Vec::with_capacity(n);
         for _ in 0..n {
-            let len  = self.file.read_u32::<LE>()? as usize;
+            let len = self.file.read_u32::<LE>()? as usize;
             let mut b = vec![0u8; len];
             self.file.read_exact(&mut b)?;
             descs.push(String::from_utf8_lossy(&b).into_owned());
@@ -406,23 +434,28 @@ impl Storage {
 
         // journal_entry_id column
         let entry_ids = {
-            self.file.seek(SeekFrom::Start(meta.header.columns[col::ENTRY_ID].offset))?;
+            self.file
+                .seek(SeekFrom::Start(meta.header.columns[col::ENTRY_ID].offset))?;
             let mut v = Vec::with_capacity(n);
-            for _ in 0..n { v.push(self.file.read_u64::<LE>()?); }
+            for _ in 0..n {
+                v.push(self.file.read_u64::<LE>()?);
+            }
             v
         };
 
-        let txs = (0..n).map(|i| Transaction {
-            id:               ids[i],
-            journal_entry_id: entry_ids[i],
-            account_id:       accts[i],
-            amount:           amts[i],
-            transaction_type: TransactionType::from_u8(types[i])
-                                  .unwrap_or(TransactionType::Debit),
-            timestamp:        ts[i],
-            description:      descs[i].clone(),
-            tx_hash:          hashes[i],
-        }).collect();
+        let txs = (0..n)
+            .map(|i| Transaction {
+                id: ids[i],
+                journal_entry_id: entry_ids[i],
+                account_id: accts[i],
+                amount: amts[i],
+                transaction_type: TransactionType::from_u8(types[i])
+                    .unwrap_or(TransactionType::Debit),
+                timestamp: ts[i],
+                description: descs[i].clone(),
+                tx_hash: hashes[i],
+            })
+            .collect();
         Ok(txs)
     }
 
@@ -438,13 +471,17 @@ impl Storage {
 
 fn serialise_u64_col(values: impl Iterator<Item = u64>) -> Vec<u8> {
     let mut v = Vec::new();
-    for x in values { v.extend_from_slice(&x.to_le_bytes()); }
+    for x in values {
+        v.extend_from_slice(&x.to_le_bytes());
+    }
     v
 }
 
 fn serialise_i64_col(values: impl Iterator<Item = i64>) -> Vec<u8> {
     let mut v = Vec::new();
-    for x in values { v.extend_from_slice(&x.to_le_bytes()); }
+    for x in values {
+        v.extend_from_slice(&x.to_le_bytes());
+    }
     v
 }
 
@@ -452,10 +489,17 @@ fn serialise_i64_col(values: impl Iterator<Item = i64>) -> Vec<u8> {
 fn serialise_dict_u8_col(values: impl Iterator<Item = u8>) -> (Vec<u8>, u8) {
     let vals: Vec<u8> = values.collect();
     let mut dict = Vec::<u8>::new();
-    let codes: Vec<u8> = vals.iter().map(|&v| {
-        if let Some(p) = dict.iter().position(|&d| d == v) { p as u8 }
-        else { dict.push(v); (dict.len() - 1) as u8 }
-    }).collect();
+    let codes: Vec<u8> = vals
+        .iter()
+        .map(|&v| {
+            if let Some(p) = dict.iter().position(|&d| d == v) {
+                p as u8
+            } else {
+                dict.push(v);
+                (dict.len() - 1) as u8
+            }
+        })
+        .collect();
     let mut out = vec![dict.len() as u8];
     out.extend_from_slice(&dict);
     out.extend_from_slice(&codes);
@@ -474,6 +518,8 @@ fn serialise_string_col<'a>(values: impl Iterator<Item = &'a str>) -> Vec<u8> {
 
 fn serialise_hash_col<'a>(values: impl Iterator<Item = &'a [u8; 32]>) -> Vec<u8> {
     let mut v = Vec::new();
-    for h in values { v.extend_from_slice(h); }
+    for h in values {
+        v.extend_from_slice(h);
+    }
     v
 }

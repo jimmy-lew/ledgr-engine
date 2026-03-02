@@ -34,15 +34,15 @@
 //! WAL lives in a *separate* `wal.log` alongside the `.ldg` file.
 //! ```
 
+pub mod engine;
 pub mod error;
-pub mod models;
 pub mod file_format;
 pub mod hash_chain;
+pub mod models;
 pub mod simd_scan;
 pub mod sparse_index;
 pub mod storage;
 pub mod wal;
-pub mod engine;
 
 pub use engine::LedgerEngine;
 pub use error::LedgerError;
