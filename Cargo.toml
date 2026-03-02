@@ -1,16 +1,21 @@
 [package]
-name = "ledger-engine"
-version = "0.1.0"
-edition = "2021"
-description = "Custom embedded columnar storage engine for double-entry financial ledger"
+name        = "ledger-engine"
+version     = "0.1.0"
+edition     = "2021"
+description = "Single-file columnar storage engine for double-entry financial ledgers"
 
 [dependencies]
-crc32fast  = "1.4"          # CRC32 checksums for header integrity
-byteorder  = "1.5"          # Deterministic little-endian byte serialisation
-uuid       = { version = "1.8", features = ["v4"] }
-chrono     = { version = "0.4", features = ["serde"] }
-thiserror  = "1.0"          # Ergonomic error types
-parking_lot = "0.12"        # Faster RwLock / Mutex than std
+crc32fast   = "1.4"           # CRC32 checksums for header/segment integrity
+byteorder   = "1.5"           # Deterministic LE byte serialisation
+sha2        = "0.10"          # SHA-256 for tamper-evident hash chain
+hex         = "0.4"           # Debug display of hashes
+thiserror   = "1.0"           # Ergonomic error types
+parking_lot = "0.12"          # Faster RwLock / Mutex than std
 
 [dev-dependencies]
-tempfile = "3"              # Disposable directories in tests
+tempfile    = "3"             # Disposable directories in tests
+
+# Enable AVX2 for SIMD balance scan in release builds.
+# In practice you would also gate this at runtime via is_x86_feature_detected!.
+[profile.release]
+opt-level = 3

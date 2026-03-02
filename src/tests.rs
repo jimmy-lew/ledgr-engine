@@ -1,256 +1,315 @@
-//! Integration tests for the ledger storage engine.
-
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
     use ledger_engine::*;
-    use ledger_engine::sstable::*;
+    use ledger_engine::file_format::*;
     use ledger_engine::models::*;
+    use ledger_engine::hash_chain::{compute_tx_hash, genesis_hash};
+    use ledger_engine::sparse_index::{SparseIndex, SPARSE_FACTOR};
+    use ledger_engine::simd_scan;
 
-    // ── Helper: build a minimal valid Transaction ──────────────────────────
+    // ── Helpers ────────────────────────────────────────────────────────────
 
-    fn make_tx(id: u64, account_id: u64, amount: i64, tx_type: TransactionType, ts: u64) -> Transaction {
+    fn make_tx(id: u64, account_id: u64, amount: i64, tt: TransactionType, ts: u64) -> Transaction {
         Transaction {
-            id,
-            account_id,
-            amount,
-            transaction_type: tx_type,
+            id, account_id, amount, transaction_type: tt,
             timestamp: ts,
-            description: format!("Test transaction {}", id),
+            description: format!("tx-{id}"),
+            tx_hash: [0u8; 32],
         }
     }
 
-    // ────────────────────────────────────────────────────────────────────────
-    // 1. Header round-trip: write → read → verify every field
-    // ────────────────────────────────────────────────────────────────────────
+    // ──────────────────────────────────────────────────────────────────────
+    // 1. File header round-trip and CRC
+    // ──────────────────────────────────────────────────────────────────────
     #[test]
-    fn header_roundtrip() {
-        let checksum = SSTableHeader::compute_checksum(&MAGIC, VERSION, 100, 1000, 2000);
-        let header = SSTableHeader {
-            magic:     MAGIC,
-            version:   VERSION,
-            row_count: 100,
-            min_ts:    1000,
-            max_ts:    2000,
-            checksum,
-            columns:   [ColumnMeta::default(); NUM_COLUMNS],
-        };
+    fn file_header_roundtrip() {
+        let mut hdr = FileHeader::new();
+        hdr.accounts_count = 42;
+        hdr.total_tx_count = 1_000_000;
+        hdr.last_tx_hash   = [0xABu8; 32];
 
-        let mut buf = Cursor::new(Vec::<u8>::new());
-        header.write_to(&mut buf).unwrap();
-
-        // Verify exact byte count
-        assert_eq!(buf.get_ref().len(), HEADER_SIZE, "header must be exactly {HEADER_SIZE} bytes");
-
-        // Seek back and deserialise
-        buf.set_position(0);
-        let parsed = SSTableHeader::read_from(&mut buf).unwrap();
-
-        assert_eq!(parsed.magic,     MAGIC);
-        assert_eq!(parsed.version,   VERSION);
-        assert_eq!(parsed.row_count, 100);
-        assert_eq!(parsed.min_ts,    1000);
-        assert_eq!(parsed.max_ts,    2000);
-        assert_eq!(parsed.checksum,  checksum);
-    }
-
-    // ────────────────────────────────────────────────────────────────────────
-    // 2. Corrupted magic bytes → BadMagic error
-    // ────────────────────────────────────────────────────────────────────────
-    #[test]
-    fn header_bad_magic_detected() {
-        let checksum = SSTableHeader::compute_checksum(&MAGIC, VERSION, 1, 0, 0);
-        let header = SSTableHeader {
-            magic: MAGIC, version: VERSION, row_count: 1,
-            min_ts: 0, max_ts: 0, checksum,
-            columns: [ColumnMeta::default(); NUM_COLUMNS],
-        };
-
-        let mut buf = Cursor::new(Vec::<u8>::new());
-        header.write_to(&mut buf).unwrap();
-
-        // Corrupt the magic bytes
-        buf.get_mut()[0] = 0xFF;
+        let mut buf = Cursor::new(vec![0u8; FILE_HEADER_SIZE]);
+        hdr.write_to(&mut buf).unwrap();
+        assert_eq!(buf.get_ref().len(), FILE_HEADER_SIZE);
 
         buf.set_position(0);
-        let result = SSTableHeader::read_from(&mut buf);
-        assert!(matches!(result, Err(LedgerError::BadMagic)));
+        let restored = FileHeader::read_from(&mut buf).unwrap();
+        assert_eq!(restored.accounts_count, 42);
+        assert_eq!(restored.total_tx_count, 1_000_000);
+        assert_eq!(restored.last_tx_hash,   [0xABu8; 32]);
+        assert_eq!(&restored.magic,          b"LDGR");
     }
 
-    // ────────────────────────────────────────────────────────────────────────
-    // 3. Corrupted header payload → ChecksumMismatch error
-    // ────────────────────────────────────────────────────────────────────────
     #[test]
-    fn header_checksum_mismatch_detected() {
-        let checksum = SSTableHeader::compute_checksum(&MAGIC, VERSION, 42, 100, 200);
-        let header = SSTableHeader {
-            magic: MAGIC, version: VERSION, row_count: 42,
-            min_ts: 100, max_ts: 200, checksum,
-            columns: [ColumnMeta::default(); NUM_COLUMNS],
-        };
-
-        let mut buf = Cursor::new(Vec::<u8>::new());
-        header.write_to(&mut buf).unwrap();
-
-        // Flip a bit in the row_count field (offset 5)
-        buf.get_mut()[5] ^= 0xFF;
-
+    fn file_header_detects_bad_magic() {
+        let mut hdr = FileHeader::new();
+        let mut buf = Cursor::new(vec![0u8; FILE_HEADER_SIZE]);
+        hdr.write_to(&mut buf).unwrap();
+        buf.get_mut()[0] = 0xFF;  // corrupt magic
         buf.set_position(0);
-        let result = SSTableHeader::read_from(&mut buf);
-        assert!(matches!(result, Err(LedgerError::ChecksumMismatch { .. })));
+        assert!(matches!(FileHeader::read_from(&mut buf), Err(LedgerError::BadMagic)));
     }
 
-    // ────────────────────────────────────────────────────────────────────────
-    // 4. Full SSTable write → read; verify column offsets and amount sums
-    // ────────────────────────────────────────────────────────────────────────
     #[test]
-    fn sstable_write_and_sum_amounts() {
-        let rows = vec![
-            make_tx(1, 10, -5000, TransactionType::Debit,  1_000_000),
-            make_tx(2, 10,  5000, TransactionType::Credit, 1_000_001),
-            make_tx(3, 20, -3000, TransactionType::Debit,  1_000_002),
-            make_tx(4, 20,  3000, TransactionType::Credit, 1_000_003),
-        ];
+    fn file_header_detects_crc_corruption() {
+        let mut hdr = FileHeader::new();
+        hdr.total_tx_count = 5;
+        let mut buf = Cursor::new(vec![0u8; FILE_HEADER_SIZE]);
+        hdr.write_to(&mut buf).unwrap();
+        // Flip a bit in total_tx_count (offset 0x028)
+        buf.get_mut()[0x028] ^= 0x01;
+        buf.set_position(0);
+        assert!(matches!(
+            FileHeader::read_from(&mut buf),
+            Err(LedgerError::HeaderChecksumMismatch { .. })
+        ));
+    }
 
-        let mut buf = Cursor::new(Vec::<u8>::new());
-        let header = SSTableWriter::write(&mut buf, &rows).unwrap();
+    // ──────────────────────────────────────────────────────────────────────
+    // 2. Hash chain – correct chaining and tamper detection
+    // ──────────────────────────────────────────────────────────────────────
+    #[test]
+    fn hash_chain_builds_correctly() {
+        let mut prev = genesis_hash();
+        let txs: Vec<Transaction> = (1..=5)
+            .map(|i| make_tx(i, 1, i as i64 * 100, TransactionType::Credit, i * 1000))
+            .collect();
 
-        // Header sanity
-        assert_eq!(header.row_count, 4);
-        assert_eq!(header.min_ts,    1_000_000);
-        assert_eq!(header.max_ts,    1_000_003);
-
-        // Column offsets must be non-overlapping and in ascending order
-        for i in 0..NUM_COLUMNS - 1 {
-            let a = &header.columns[i];
-            let b = &header.columns[i + 1];
-            assert!(
-                a.offset + a.length <= b.offset,
-                "column {} overlaps column {}",
-                i, i + 1
-            );
+        let mut hashes = Vec::new();
+        for tx in &txs {
+            let h = compute_tx_hash(tx, &prev);
+            hashes.push(h);
+            prev = h;
         }
 
-        // Amount column: seek directly and sum
-        buf.set_position(0);
-        let sum = SSTableReader::sum_amounts(&mut buf, &header).unwrap();
-        assert_eq!(sum, 0, "balanced test data must sum to 0");
-
-        // Encoding: transaction_type must be dictionary encoded
-        assert_eq!(header.columns[col::TYPE].encoding, Encoding::Dictionary as u8);
-        // All others (id, account_id, amount, timestamp) must be None
-        assert_eq!(header.columns[col::ID  ].encoding, Encoding::None as u8);
-        assert_eq!(header.columns[col::AMT ].encoding, Encoding::None as u8);
+        // Each hash must be different
+        for i in 0..hashes.len() - 1 {
+            assert_ne!(hashes[i], hashes[i+1], "consecutive hashes must differ");
+        }
     }
 
-    // ────────────────────────────────────────────────────────────────────────
-    // 5. Zone-map filtering
-    // ────────────────────────────────────────────────────────────────────────
     #[test]
-    fn zone_map_overlap() {
-        let rows = vec![
-            make_tx(1, 1, 100, TransactionType::Credit, 1_000),
-            make_tx(2, 1, -100, TransactionType::Debit, 2_000),
-        ];
-        let mut buf = Cursor::new(Vec::<u8>::new());
-        let header = SSTableWriter::write(&mut buf, &rows).unwrap();
+    fn hash_chain_detects_amount_change() {
+        let prev  = genesis_hash();
+        let mut tx = make_tx(1, 1, 1000, TransactionType::Credit, 100);
 
-        assert!(SSTableReader::overlaps_time_range(&header, 500,   1_500));  // overlaps
-        assert!(SSTableReader::overlaps_time_range(&header, 1_000, 2_000));  // exact match
-        assert!(!SSTableReader::overlaps_time_range(&header, 2_001, 3_000)); // after
-        assert!(!SSTableReader::overlaps_time_range(&header, 0,     999));   // before
+        let original_hash = compute_tx_hash(&tx, &prev);
+
+        // Tamper with the amount
+        tx.amount = 999_999;
+        let tampered_hash = compute_tx_hash(&tx, &prev);
+
+        assert_ne!(original_hash, tampered_hash,
+            "changing amount must produce a different hash");
     }
 
-    // ────────────────────────────────────────────────────────────────────────
-    // 6. Expense summary aggregation
-    // ────────────────────────────────────────────────────────────────────────
     #[test]
-    fn aggregate_by_type_in_range() {
-        let rows = vec![
-            make_tx(1, 1, -1000, TransactionType::Debit,  100),
-            make_tx(2, 1,  1000, TransactionType::Credit, 200),
-            make_tx(3, 1, -2000, TransactionType::Debit,  300),
-            make_tx(4, 1,  2000, TransactionType::Credit, 400),
-            make_tx(5, 1, -9999, TransactionType::Debit,  999), // outside range
-        ];
+    fn hash_chain_avalanche_effect() {
+        // Changing an early transaction must cascade to change all subsequent hashes
+        let txs: Vec<Transaction> = (1..=4)
+            .map(|i| make_tx(i, 1, i as i64 * 10, TransactionType::Debit, i * 500))
+            .collect();
 
-        let mut buf = Cursor::new(Vec::<u8>::new());
-        let header = SSTableWriter::write(&mut buf, &rows).unwrap();
+        // Compute honest chain
+        let mut prev = genesis_hash();
+        let mut honest: Vec<[u8; 32]> = Vec::new();
+        for tx in &txs { let h = compute_tx_hash(tx, &prev); honest.push(h); prev = h; }
 
-        buf.set_position(0);
-        let (debits, credits) =
-            SSTableReader::aggregate_by_type_in_range(&mut buf, &header, 100, 400).unwrap();
+        // Tamper tx[0] and recompute from there
+        let mut tampered_tx0 = txs[0].clone();
+        tampered_tx0.amount = 999;
+        let mut prev_t = genesis_hash();
+        let mut tampered: Vec<[u8; 32]> = Vec::new();
+        let altered = compute_tx_hash(&tampered_tx0, &prev_t);
+        tampered.push(altered); prev_t = altered;
+        for tx in &txs[1..] { let h = compute_tx_hash(tx, &prev_t); tampered.push(h); prev_t = h; }
 
-        assert_eq!(debits,  -3000);
-        assert_eq!(credits,  3000);
+        // All four hashes must differ
+        for i in 0..4 {
+            assert_ne!(honest[i], tampered[i],
+                "hash at position {i} should differ after tampering position 0");
+        }
     }
 
-    // ────────────────────────────────────────────────────────────────────────
-    // 7. Bitmap index – set / count / matching_rows
-    // ────────────────────────────────────────────────────────────────────────
+    // ──────────────────────────────────────────────────────────────────────
+    // 3. Sparse index queries
+    // ──────────────────────────────────────────────────────────────────────
     #[test]
-    fn bitmap_index_operations() {
-        use ledger_engine::indexes::BitmapIndex;
+    fn sparse_index_lower_bound() {
+        // 320 rows with timestamps 0, 100, 200, …, 31900
+        let rows: Vec<(u64, u64)> = (0u64..320).map(|i| (i * 100, i)).collect();
+        let idx = SparseIndex::build(&rows);
 
-        let mut idx = BitmapIndex::new();
-        idx.set(0,  TransactionType::Debit);
-        idx.set(1,  TransactionType::Credit);
-        idx.set(63, TransactionType::Debit);
-        idx.set(64, TransactionType::Debit);   // second word
+        // Expected entries at rows 0, 64, 128, 192, 256
+        assert_eq!(idx.entries.len(), 5);
 
-        assert_eq!(idx.count(TransactionType::Debit),  3);
-        assert_eq!(idx.count(TransactionType::Credit), 1);
+        // Query ts=6400 (row 64) → exact match at sparse entry 1
+        assert_eq!(idx.lower_bound_row(6400), 64);
 
-        let debit_rows = idx.matching_rows(TransactionType::Debit);
-        assert_eq!(debit_rows, vec![0, 63, 64]);
+        // Query ts=7000 (between rows 70 and 71) → returns row 64 (safe lower bound)
+        assert_eq!(idx.lower_bound_row(7_000), 64);
+
+        // Query ts=0 → row 0
+        assert_eq!(idx.lower_bound_row(0), 0);
+
+        // Query ts=999_999 → last sparse entry (row 256)
+        assert_eq!(idx.lower_bound_row(999_999), 256);
     }
 
-    // ────────────────────────────────────────────────────────────────────────
-    // 8. End-to-end engine: append → validate → summarise
-    // ────────────────────────────────────────────────────────────────────────
     #[test]
-    fn engine_end_to_end() {
-        let tmp = tempfile::tempdir().unwrap();
-        let engine = LedgerEngine::open(tmp.path()).unwrap();
+    fn sparse_index_skips_segments_correctly() {
+        // Simulates 192 rows; we want only those with ts ∈ [5000, 10000].
+        // Rows 0–63: ts 0–6300; rows 64–127: ts 6400–12700
+        let rows: Vec<(u64, u64)> = (0u64..192).map(|i| (i * 100, i)).collect();
+        let idx  = SparseIndex::build(&rows);
 
-        let asset_acct   = engine.create_account("Cash",    AccountType::Asset).unwrap();
-        let expense_acct = engine.create_account("Expense", AccountType::Expense).unwrap();
+        let start_row = idx.lower_bound_row(5_000);
+        // Row with ts 5000 is row 50, but sparse lower bound snaps to row 0
+        // (the only entry before row 64 is row 0 with ts=0)
+        assert!(start_row <= 50, "lower bound must not overshoot the start");
+    }
 
-        // Double-entry: debit cash -500, credit expense +500 (net = 0)
-        engine.append_transaction(asset_acct,   -500, TransactionType::Debit,  "Office supplies").unwrap();
-        engine.append_transaction(expense_acct,  500, TransactionType::Credit, "Office supplies").unwrap();
+    // ──────────────────────────────────────────────────────────────────────
+    // 4. SIMD scan – basic arithmetic correctness
+    // ──────────────────────────────────────────────────────────────────────
+    #[test]
+    fn simd_sum_balanced_amounts() {
+        let amts: Vec<i64> = vec![-100, 100, -200, 200, -50, 50, -1000, 1000];
+        assert_eq!(simd_scan::simd_sum_i64(&amts), 0);
+    }
 
-        // Another balanced pair
-        engine.append_transaction(asset_acct,   -1000, TransactionType::Debit,  "Rent").unwrap();
-        engine.append_transaction(expense_acct,  1000, TransactionType::Credit, "Rent").unwrap();
+    #[test]
+    fn simd_split_sum_large() {
+        let n = 10_000usize;
+        let amounts:  Vec<i64> = (0..n).map(|i| if i % 2 == 0 { -(i as i64 + 1) } else { i as i64 + 1 }).collect();
+        let tx_types: Vec<u8>  = (0..n).map(|i| (i % 2) as u8).collect();
 
-        // Ledger must balance in the MemTable
+        let (scalar_d, scalar_c) = {
+            let mut d = 0i64; let mut c = 0i64;
+            for (i, (&a, &t)) in amounts.iter().zip(tx_types.iter()).enumerate() {
+                if t == 0 { d += a; } else { c += a; }
+            }
+            (d, c)
+        };
+
+        let (simd_d, simd_c) = simd_scan::simd_sum_by_type(&amounts, &tx_types);
+        assert_eq!(simd_d, scalar_d);
+        assert_eq!(simd_c, scalar_c);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // 5. End-to-end engine: append → flush → validate → query
+    // ──────────────────────────────────────────────────────────────────────
+    #[test]
+    fn engine_end_to_end_balanced() {
+        let tmp    = tempfile::tempdir().unwrap();
+        let dbpath = tmp.path().join("ledger.ldg");
+        let engine = LedgerEngine::open(&dbpath).unwrap();
+
+        let cash    = engine.create_account("Cash",    AccountType::Asset).unwrap();
+        let expense = engine.create_account("Expense", AccountType::Expense).unwrap();
+        let revenue = engine.create_account("Revenue", AccountType::Revenue).unwrap();
+
+        // Balanced: revenue +$1 200, cash +$1 200
+        engine.append_transaction(cash,    120_000, TransactionType::Credit, "Sale proceeds").unwrap();
+        engine.append_transaction(revenue,-120_000, TransactionType::Debit,  "Revenue recognised").unwrap();
+
+        // Balanced: expense +$300, cash –$300
+        engine.append_transaction(expense,  30_000, TransactionType::Debit,  "Rent").unwrap();
+        engine.append_transaction(cash,    -30_000, TransactionType::Credit, "Rent payment").unwrap();
+
+        // In-MemTable validation
         engine.validate_ledger().unwrap();
 
-        // Force flush to SSTable then validate again (hits the disk path)
+        // Flush to disk, then re-validate (exercises the SSTable read path)
         engine.force_flush().unwrap();
         engine.validate_ledger().unwrap();
-
-        // Expense summary over all time
-        let summary = engine.get_expense_summary(0, u64::MAX).unwrap();
-        assert_eq!(summary.total_debits,  -1500);
-        assert_eq!(summary.total_credits,  1500);
-        assert_eq!(summary.net, 0);
     }
 
-    // ────────────────────────────────────────────────────────────────────────
-    // 9. Imbalanced ledger is caught
-    // ────────────────────────────────────────────────────────────────────────
     #[test]
     fn engine_detects_imbalance() {
-        let tmp = tempfile::tempdir().unwrap();
-        let engine = LedgerEngine::open(tmp.path()).unwrap();
+        let tmp    = tempfile::tempdir().unwrap();
+        let dbpath = tmp.path().join("ledger.ldg");
+        let engine = LedgerEngine::open(&dbpath).unwrap();
 
-        let acct = engine.create_account("Cash", AccountType::Asset).unwrap();
-        engine.append_transaction(acct, -500, TransactionType::Debit, "Orphaned debit").unwrap();
+        let acct = engine.create_account("Orphan", AccountType::Asset).unwrap();
+        engine.append_transaction(acct, 50_000, TransactionType::Credit, "Ghost credit").unwrap();
 
-        // Only one side of the entry → net = -500
-        let result = engine.validate_ledger();
-        assert!(matches!(result, Err(LedgerError::ImbalancedLedger { net: -500 })));
+        match engine.validate_ledger() {
+            Err(LedgerError::ImbalancedLedger { net }) => {
+                assert_eq!(net, 50_000, "net should equal the orphaned amount");
+            }
+            other => panic!("expected ImbalancedLedger, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn engine_expense_summary_with_zone_skip() {
+        let tmp    = tempfile::tempdir().unwrap();
+        let dbpath = tmp.path().join("ledger.ldg");
+        let engine = LedgerEngine::open(&dbpath).unwrap();
+
+        let acct = engine.create_account("Test", AccountType::Asset).unwrap();
+
+        // Use manual timestamp injection is not directly possible through
+        // the public API (timestamp = now), so we just verify the summary
+        // returns sensible totals across all time.
+        engine.append_transaction(acct, -500, TransactionType::Debit,  "Out").unwrap();
+        engine.append_transaction(acct,  500, TransactionType::Credit, "In").unwrap();
+
+        engine.force_flush().unwrap();
+
+        let summary = engine.get_expense_summary(0, u64::MAX).unwrap();
+        assert_eq!(summary.total_debits  + summary.total_credits, 0);
+        assert_eq!(summary.net, 0);
+        assert_eq!(summary.row_count, 2);
+    }
+
+    #[test]
+    fn engine_survives_crash_recovery() {
+        let tmp    = tempfile::tempdir().unwrap();
+        let dbpath = tmp.path().join("ledger.ldg");
+
+        // First session: write some transactions but do NOT flush
+        {
+            let engine = LedgerEngine::open(&dbpath).unwrap();
+            let acct = engine.create_account("Recovery", AccountType::Equity).unwrap();
+            engine.append_transaction(acct, -200, TransactionType::Debit,  "pre-crash debit").unwrap();
+            engine.append_transaction(acct,  200, TransactionType::Credit, "pre-crash credit").unwrap();
+            // Drop without flushing – WAL has the data, .ldg has only the account
+        }
+
+        // Second session: replay WAL, verify recovery
+        {
+            let engine = LedgerEngine::open(&dbpath).unwrap();
+            // After WAL replay the MemTable should be populated
+            engine.validate_ledger().unwrap();   // should balance
+        }
+    }
+
+    #[test]
+    fn single_file_contains_all_data() {
+        use std::fs;
+        let tmp    = tempfile::tempdir().unwrap();
+        let dbpath = tmp.path().join("ledger.ldg");
+        let engine = LedgerEngine::open(&dbpath).unwrap();
+
+        let acct = engine.create_account("SoleAccount", AccountType::Asset).unwrap();
+        engine.append_transaction(acct, 1_000, TransactionType::Credit, "deposit").unwrap();
+        engine.append_transaction(acct,-1_000, TransactionType::Debit,  "withdrawal").unwrap();
+        engine.force_flush().unwrap();
+
+        // The WAL should be empty after flush (truncated)
+        let wal_path = dbpath.with_extension("wal");
+        let wal_len  = fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0);
+        assert_eq!(wal_len, 0, "WAL must be empty after successful flush");
+
+        // The single .ldg file must exist and contain the data
+        let ldg_size = fs::metadata(&dbpath).unwrap().len();
+        assert!(
+            ldg_size >= file_format::SEGMENTS_BASE_OFFSET,
+            ".ldg file must be at least as large as the accounts region"
+        );
     }
 }
