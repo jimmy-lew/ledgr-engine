@@ -18,13 +18,16 @@ pub const FLUSH_THRESHOLD_BYTES: usize = 4 * 1024 * 1024;
 struct MemKey(u64 /* ts */, u64 /* id */);
 
 pub struct MemTable {
-    data:       BTreeMap<MemKey, Transaction>,
+    data: BTreeMap<MemKey, Transaction>,
     size_bytes: usize,
 }
 
 impl MemTable {
     pub fn new() -> Self {
-        Self { data: BTreeMap::new(), size_bytes: 0 }
+        Self {
+            data: BTreeMap::new(),
+            size_bytes: 0,
+        }
     }
 
     /// Insert a transaction.  Returns the new approximate size in bytes.
@@ -54,11 +57,19 @@ impl MemTable {
         self.data.values()
     }
 
-    pub fn len(&self) -> usize { self.data.len() }
-    pub fn is_empty(&self) -> bool { self.data.is_empty() }
-    pub fn size_bytes(&self) -> usize { self.size_bytes }
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+    pub fn size_bytes(&self) -> usize {
+        self.size_bytes
+    }
 }
 
 impl Default for MemTable {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }

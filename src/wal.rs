@@ -9,10 +9,10 @@
 //!
 //! ```text
 //! ┌────────────────────────────────────────────────────────┐
-//! │ 0x00        [1 B]  Record type  (0x01 = Transaction)  │
-//! │ 0x01–0x04   [4 B]  Payload CRC32                      │
-//! │ 0x05–0x08   [4 B]  Payload length (bytes)             │
-//! │ 0x09–…      [N B]  Payload (serialised Transaction)   │
+//! │ 0x00        [1 B]  Record type  (0x01 = Transaction)   │
+//! │ 0x01–0x04   [4 B]  Payload CRC32                       │
+//! │ 0x05–0x08   [4 B]  Payload length (bytes)              │
+//! │ 0x09–…      [N B]  Payload (serialised Transaction)    │
 //! └────────────────────────────────────────────────────────┘
 //! ```
 
@@ -20,7 +20,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use byteorder::{LE, ReadBytesExt, WriteBytesExt};
+use byteorder::{ReadBytesExt, WriteBytesExt, LE};
 use crc32fast::Hasher as Crc32Hasher;
 
 use crate::error::{LedgerError, Result};
@@ -38,12 +38,13 @@ impl Wal {
     /// Open (or create) the WAL at `path`.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
+        let file = OpenOptions::new().create(true).append(true).open(&path)?;
         let byte_offset = file.metadata()?.len();
-        Ok(Self { path, writer: BufWriter::new(file), byte_offset })
+        Ok(Self {
+            path,
+            writer: BufWriter::new(file),
+            byte_offset,
+        })
     }
 
     /// Append a transaction record and **fsync**.
@@ -82,9 +83,9 @@ impl Wal {
             if record_type != RECORD_TYPE_TX {
                 return Err(LedgerError::WalCorruption { offset });
             }
-            let stored_crc    = file.read_u32::<LE>()?;
-            let payload_len   = file.read_u32::<LE>()? as usize;
-            let mut payload   = vec![0u8; payload_len];
+            let stored_crc = file.read_u32::<LE>()?;
+            let payload_len = file.read_u32::<LE>()? as usize;
+            let mut payload = vec![0u8; payload_len];
             file.read_exact(&mut payload)?;
 
             let computed = Self::crc32(&payload);
@@ -117,15 +118,22 @@ impl Wal {
 
     fn deserialise_tx(buf: &[u8]) -> Result<Transaction> {
         use std::convert::TryInto;
-        let id         = u64::from_le_bytes(buf[0..8].try_into().unwrap());
+        let id = u64::from_le_bytes(buf[0..8].try_into().unwrap());
         let account_id = u64::from_le_bytes(buf[8..16].try_into().unwrap());
-        let amount     = i64::from_le_bytes(buf[16..24].try_into().unwrap());
-        let tx_type    = crate::models::TransactionType::from_u8(buf[24])
+        let amount = i64::from_le_bytes(buf[16..24].try_into().unwrap());
+        let tx_type = crate::models::TransactionType::from_u8(buf[24])
             .ok_or_else(|| LedgerError::Encoding("invalid tx type in WAL".into()))?;
-        let timestamp  = u64::from_le_bytes(buf[25..33].try_into().unwrap());
-        let desc_len   = u32::from_le_bytes(buf[33..37].try_into().unwrap()) as usize;
+        let timestamp = u64::from_le_bytes(buf[25..33].try_into().unwrap());
+        let desc_len = u32::from_le_bytes(buf[33..37].try_into().unwrap()) as usize;
         let description = String::from_utf8_lossy(&buf[37..37 + desc_len]).into_owned();
-        Ok(Transaction { id, account_id, amount, transaction_type: tx_type, timestamp, description })
+        Ok(Transaction {
+            id,
+            account_id,
+            amount,
+            transaction_type: tx_type,
+            timestamp,
+            description,
+        })
     }
 
     fn crc32(data: &[u8]) -> u32 {

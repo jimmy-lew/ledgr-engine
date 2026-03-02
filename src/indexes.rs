@@ -32,7 +32,7 @@ pub struct RowRef {
     /// Zero-based SSTable sequence number (matches the file naming scheme).
     pub sstable_seq: u64,
     /// Zero-based row index within that SSTable.
-    pub row_index:   u64,
+    pub row_index: u64,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -52,13 +52,16 @@ pub struct BitmapIndex {
 
 impl BitmapIndex {
     pub fn new() -> Self {
-        Self { bitmaps: HashMap::new(), row_count: 0 }
+        Self {
+            bitmaps: HashMap::new(),
+            row_count: 0,
+        }
     }
 
     /// Record that row `row_idx` in this index has `tx_type`.
     pub fn set(&mut self, row_idx: u64, tx_type: TransactionType) {
         let key = tx_type as u8;
-        let word_idx  = (row_idx / 64) as usize;
+        let word_idx = (row_idx / 64) as usize;
         let bit_shift = row_idx % 64;
 
         let bitmap = self.bitmaps.entry(key).or_default();
@@ -81,7 +84,9 @@ impl BitmapIndex {
             Some(words) => {
                 let mut result = Vec::new();
                 for (word_idx, &word) in words.iter().enumerate() {
-                    if word == 0 { continue; }
+                    if word == 0 {
+                        continue;
+                    }
                     for bit in 0..64u64 {
                         if word & (1u64 << bit) != 0 {
                             result.push(word_idx as u64 * 64 + bit);
@@ -105,12 +110,14 @@ impl BitmapIndex {
     pub fn merge(&mut self, other: &BitmapIndex, row_offset: u64) {
         for (&key, words) in &other.bitmaps {
             for (word_idx, &word) in words.iter().enumerate() {
-                if word == 0 { continue; }
+                if word == 0 {
+                    continue;
+                }
                 for bit in 0..64u64 {
                     if word & (1u64 << bit) != 0 {
                         let global_row = row_offset + word_idx as u64 * 64 + bit;
-                        let tx_type = TransactionType::from_u8(key)
-                            .unwrap_or(TransactionType::Debit);
+                        let tx_type =
+                            TransactionType::from_u8(key).unwrap_or(TransactionType::Debit);
                         self.set(global_row, tx_type);
                     }
                 }
@@ -119,7 +126,11 @@ impl BitmapIndex {
     }
 }
 
-impl Default for BitmapIndex { fn default() -> Self { Self::new() } }
+impl Default for BitmapIndex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Account (B-Tree / Hash) Index
@@ -131,25 +142,34 @@ impl Default for BitmapIndex { fn default() -> Self { Self::new() } }
 /// - `BTreeMap` wrapping the same values for ordered range scans.
 pub struct AccountIndex {
     /// Fast exact-match path.
-    hash_map:  HashMap<u64, Vec<RowRef>>,
+    hash_map: HashMap<u64, Vec<RowRef>>,
     /// Ordered path for range queries (`account_id BETWEEN a AND b`).
     btree_map: BTreeMap<u64, Vec<RowRef>>,
 }
 
 impl AccountIndex {
     pub fn new() -> Self {
-        Self { hash_map: HashMap::new(), btree_map: BTreeMap::new() }
+        Self {
+            hash_map: HashMap::new(),
+            btree_map: BTreeMap::new(),
+        }
     }
 
     /// Record a row reference for `account_id`.
     pub fn insert(&mut self, account_id: u64, row: RowRef) {
-        self.hash_map.entry(account_id).or_default().push(row.clone());
+        self.hash_map
+            .entry(account_id)
+            .or_default()
+            .push(row.clone());
         self.btree_map.entry(account_id).or_default().push(row);
     }
 
     /// Return all `RowRef`s for an exact `account_id`.  O(1) amortised.
     pub fn get(&self, account_id: u64) -> &[RowRef] {
-        self.hash_map.get(&account_id).map(Vec::as_slice).unwrap_or(&[])
+        self.hash_map
+            .get(&account_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     /// Return all `RowRef`s for account IDs in `[lo, hi]`.  O(log n + k).
@@ -160,7 +180,13 @@ impl AccountIndex {
             .collect()
     }
 
-    pub fn account_count(&self) -> usize { self.hash_map.len() }
+    pub fn account_count(&self) -> usize {
+        self.hash_map.len()
+    }
 }
 
-impl Default for AccountIndex { fn default() -> Self { Self::new() } }
+impl Default for AccountIndex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
