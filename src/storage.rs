@@ -178,22 +178,17 @@ impl Storage {
     }
 
     /// Update the stored balance for an account (called after each tx).
+    /// Only updates in-memory balance - disk write happens during flush.
     pub fn update_account_balance(&mut self, account_id: u64, delta: i64) -> Result<()> {
-        let (slot, acct) = self
-            .accounts
-            .get_mut(&account_id)
-            .ok_or(LedgerError::UnknownAccount(account_id))?;
-        acct.balance += delta;
-        let balance = acct.balance;
-        file_format::write_account_slot(
-            &mut self.file,
-            *slot,
-            acct.id,
-            &acct.name.clone(),
-            acct.kind as u8,
-            acct.created_at,
-            balance,
-        )?;
+        use std::collections::hash_map::Entry;
+        match self.accounts.entry(account_id) {
+            Entry::Occupied(entry) => {
+                entry.into_mut().1.balance += delta;
+            }
+            Entry::Vacant(_) => {
+                return Err(LedgerError::UnknownAccount(account_id));
+            }
+        }
         Ok(())
     }
 
@@ -316,6 +311,20 @@ impl Storage {
         self.header.sparse_index_count = self.sparse.len() as u64;
         self.header.total_tx_count += row_count;
         self.header.last_tx_hash = chain_tip.last_hash;
+
+        // ── Write all account balances to disk ────────────────────────────────
+        for (slot, acct) in self.accounts.values() {
+            file_format::write_account_slot(
+                &mut self.file,
+                *slot,
+                acct.id,
+                &acct.name,
+                acct.kind as u8,
+                acct.created_at,
+                acct.balance,
+            )?;
+        }
+
         self.header.write_to(&mut self.file)?;
         self.file.sync_all()?;
 
