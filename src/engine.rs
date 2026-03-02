@@ -45,22 +45,21 @@ use crate::wal::{Wal, WalEntry};
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct MemTable {
-    rows: BTreeMap<(u64, u64), Transaction>, // key = (timestamp, leg_id)
+    rows: Vec<Transaction>,
     size_bytes: usize,
 }
 
 impl MemTable {
     fn new() -> Self {
         Self {
-            rows: BTreeMap::new(),
+            rows: Vec::new(),
             size_bytes: 0,
         }
     }
 
     fn insert(&mut self, tx: Transaction) {
-        // Approximate size: fixed fields + description + hash
         self.size_bytes += 8 + 8 + 8 + 8 + 1 + 8 + 4 + tx.description.len() + 32;
-        self.rows.insert((tx.timestamp, tx.id), tx);
+        self.rows.push(tx);
     }
 
     fn needs_flush(&self) -> bool {
@@ -68,14 +67,14 @@ impl MemTable {
     }
 
     fn drain_sorted(&mut self) -> Vec<Transaction> {
-        let rows: Vec<_> = self.rows.values().cloned().collect();
-        self.rows.clear();
+        let mut rows = std::mem::take(&mut self.rows);
+        rows.sort_by_key(|tx| (tx.timestamp, tx.id));
         self.size_bytes = 0;
         rows
     }
 
     fn iter(&self) -> impl Iterator<Item = &Transaction> {
-        self.rows.values()
+        self.rows.iter()
     }
     fn is_empty(&self) -> bool {
         self.rows.is_empty()
@@ -256,7 +255,7 @@ impl LedgerEngine {
     /// ```
     ///
     /// Returns the `journal_entry_id`.
-    pub fn record_simple_entry(
+    pub fn record_entry(
         &self,
         debit_account: u64,
         credit_account: u64,
@@ -481,6 +480,7 @@ impl LedgerEngine {
         let rows = inner.memtable.drain_sorted();
         let n = rows.len();
         inner.storage.flush_segment(rows, &mut inner.chain_tip)?;
+        inner.wal.sync()?;
         inner.wal.truncate()?;
         println!(
             "[flush] ✓  {n} legs → segment {}",
