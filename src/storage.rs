@@ -346,20 +346,24 @@ impl Storage {
 
     // ── Column read helpers ────────────────────────────────────────────────
 
-    /// Load the full `amount` (i64) column from a segment.
-    /// **Only the amount column block is read from disk.**
+    /// Load the full `amount` (i64) column from a segment using bulk read.
     pub fn read_amounts(&mut self, meta: &SegmentMeta) -> Result<Vec<i64>> {
         let col = &meta.header.columns[col::AMT];
         self.file.seek(SeekFrom::Start(col.offset))?;
         let n = meta.header.row_count as usize;
+        let byte_len = n * 8;
+        let mut buf = vec![0u8; byte_len];
+        self.file.read_exact(&mut buf)?;
+
         let mut out = Vec::with_capacity(n);
-        for _ in 0..n {
-            out.push(self.file.read_i64::<LE>()?);
+        for chunk in buf.chunks_exact(8) {
+            let val = i64::from_le_bytes(chunk.try_into().unwrap());
+            out.push(val);
         }
         Ok(out)
     }
 
-    /// Load the `tx_type` column from a segment (dictionary decoded).
+    /// Load the `tx_type` column from a segment (dictionary decoded) using bulk read.
     pub fn read_tx_types(&mut self, meta: &SegmentMeta) -> Result<Vec<u8>> {
         let col = &meta.header.columns[col::TYPE];
         self.file.seek(SeekFrom::Start(col.offset))?;
@@ -373,64 +377,74 @@ impl Storage {
         Ok(decoded)
     }
 
-    /// Load the `timestamp` column from a segment.
+    /// Load the `timestamp` column from a segment using bulk read.
     pub fn read_timestamps(&mut self, meta: &SegmentMeta) -> Result<Vec<u64>> {
         let col = &meta.header.columns[col::TS];
         self.file.seek(SeekFrom::Start(col.offset))?;
         let n = meta.header.row_count as usize;
+        let byte_len = n * 8;
+        let mut buf = vec![0u8; byte_len];
+        self.file.read_exact(&mut buf)?;
+
         let mut out = Vec::with_capacity(n);
-        for _ in 0..n {
-            out.push(self.file.read_u64::<LE>()?);
+        for chunk in buf.chunks_exact(8) {
+            let val = u64::from_le_bytes(chunk.try_into().unwrap());
+            out.push(val);
         }
         Ok(out)
     }
 
-    /// Load the `tx_hash` column for integrity verification.
+    /// Load the `tx_hash` column for integrity verification using bulk read.
     pub fn read_hashes(&mut self, meta: &SegmentMeta) -> Result<Vec<[u8; 32]>> {
         let col = &meta.header.columns[col::HASH];
         self.file.seek(SeekFrom::Start(col.offset))?;
         let n = meta.header.row_count as usize;
+        let byte_len = n * 32;
+        let mut buf = vec![0u8; byte_len];
+        self.file.read_exact(&mut buf)?;
+
         let mut out = Vec::with_capacity(n);
-        for _ in 0..n {
+        for chunk in buf.chunks_exact(32) {
             let mut h = [0u8; 32];
-            self.file.read_exact(&mut h)?;
+            h.copy_from_slice(chunk);
             out.push(h);
         }
         Ok(out)
     }
 
+    /// Bulk read helper for u64 columns
+    fn read_u64_column(&mut self, offset: u64, n: usize) -> Result<Vec<u64>> {
+        let byte_len = n * 8;
+        let mut buf = vec![0u8; byte_len];
+        self.file.seek(SeekFrom::Start(offset))?;
+        self.file.read_exact(&mut buf)?;
+
+        let mut out = Vec::with_capacity(n);
+        for chunk in buf.chunks_exact(8) {
+            let val = u64::from_le_bytes(chunk.try_into().unwrap());
+            out.push(val);
+        }
+        Ok(out)
+    }
+
     /// Load all columns needed to reconstruct `Transaction` rows (for
-    /// integrity re-computation).  More expensive than targeted column reads,
-    /// but required for the hash chain walk.
+    /// integrity re-computation). Uses bulk reads for performance.
     pub fn read_all_transactions(&mut self, meta: &SegmentMeta) -> Result<Vec<Transaction>> {
         let n = meta.header.row_count as usize;
+        let cols = &meta.header.columns;
 
-        // Load each column individually (column-sequential access pattern)
-        let ids = {
-            self.file
-                .seek(SeekFrom::Start(meta.header.columns[col::ID].offset))?;
-            let mut v = Vec::with_capacity(n);
-            for _ in 0..n {
-                v.push(self.file.read_u64::<LE>()?);
-            }
-            v
-        };
-        let accts = {
-            self.file
-                .seek(SeekFrom::Start(meta.header.columns[col::ACCT].offset))?;
-            let mut v = Vec::with_capacity(n);
-            for _ in 0..n {
-                v.push(self.file.read_u64::<LE>()?);
-            }
-            v
-        };
+        // Bulk read all fixed-width columns
+        let ids = Self::read_u64_column_from_file(&mut self.file, cols[col::ID].offset, n)?;
+        let accts = Self::read_u64_column_from_file(&mut self.file, cols[col::ACCT].offset, n)?;
         let amts = self.read_amounts(meta)?;
         let types = self.read_tx_types(meta)?;
-        let ts = self.read_timestamps(meta)?;
+        let ts = Self::read_u64_column_from_file(&mut self.file, cols[col::TS].offset, n)?;
+        let hashes = self.read_hashes(meta)?;
+        let entry_ids =
+            Self::read_u64_column_from_file(&mut self.file, cols[col::ENTRY_ID].offset, n)?;
 
-        // Descriptions (variable-length)
-        self.file
-            .seek(SeekFrom::Start(meta.header.columns[col::DESC].offset))?;
+        // Descriptions (variable-length) - still need individual reads
+        self.file.seek(SeekFrom::Start(cols[col::DESC].offset))?;
         let mut descs = Vec::with_capacity(n);
         for _ in 0..n {
             let len = self.file.read_u32::<LE>()? as usize;
@@ -438,19 +452,6 @@ impl Storage {
             self.file.read_exact(&mut b)?;
             descs.push(String::from_utf8_lossy(&b).into_owned());
         }
-
-        let hashes = self.read_hashes(meta)?;
-
-        // journal_entry_id column
-        let entry_ids = {
-            self.file
-                .seek(SeekFrom::Start(meta.header.columns[col::ENTRY_ID].offset))?;
-            let mut v = Vec::with_capacity(n);
-            for _ in 0..n {
-                v.push(self.file.read_u64::<LE>()?);
-            }
-            v
-        };
 
         let txs = (0..n)
             .map(|i| Transaction {
@@ -466,6 +467,21 @@ impl Storage {
             })
             .collect();
         Ok(txs)
+    }
+
+    /// Bulk read u64 column directly from file (static helper)
+    fn read_u64_column_from_file(file: &mut File, offset: u64, n: usize) -> Result<Vec<u64>> {
+        let byte_len = n * 8;
+        let mut buf = vec![0u8; byte_len];
+        file.seek(SeekFrom::Start(offset))?;
+        file.read_exact(&mut buf)?;
+
+        let mut out = Vec::with_capacity(n);
+        for chunk in buf.chunks_exact(8) {
+            let val = u64::from_le_bytes(chunk.try_into().unwrap());
+            out.push(val);
+        }
+        Ok(out)
     }
 
     /// Sum of all account balances (used in validate_ledger).
