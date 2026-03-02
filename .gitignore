@@ -1,0 +1,33 @@
+# Build artifacts
+/target/
+/tools/
+**/*.rs.bk
+
+# IDE
+.zed/
+.idea/
+.vscode/
+
+# Profiling
+flamegraph*.svg
+profile.json
+*.json.gz
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test databases
+*.db
+*.sqlite
+*.ldb
+
+# Coverage
+coverage.txt
+
+# Local development
+.claude/settings.local.json
+CLAUDE.md
+TODO.md
+*.disabled
+deny.toml

@@ -1,0 +1,16 @@
+[package]
+name = "ledger-engine"
+version = "0.1.0"
+edition = "2021"
+description = "Custom embedded columnar storage engine for double-entry financial ledger"
+
+[dependencies]
+crc32fast  = "1.4"          # CRC32 checksums for header integrity
+byteorder  = "1.5"          # Deterministic little-endian byte serialisation
+uuid       = { version = "1.8", features = ["v4"] }
+chrono     = { version = "0.4", features = ["serde"] }
+thiserror  = "1.0"          # Ergonomic error types
+parking_lot = "0.12"        # Faster RwLock / Mutex than std
+
+[dev-dependencies]
+tempfile = "3"              # Disposable directories in tests
