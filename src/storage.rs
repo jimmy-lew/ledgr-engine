@@ -36,7 +36,9 @@ use crate::file_format::{
 };
 use crate::hash_chain::{self, ChainTip};
 use crate::models::{Account, AccountType, Transaction, TransactionType};
-use crate::sparse_index::SparseIndex;
+use crate::sparse_index::{SparseEntry, SparseIndex, SPARSE_FACTOR};
+
+const CHECKPOINT_INTERVAL: u64 = 100;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // In-memory segment catalogue
@@ -135,8 +137,44 @@ impl Storage {
             offset += seg_size;
         }
 
-        // 4. Load the sparse index
-        if self.header.sparse_index_count > 0 {
+        // 4. Load or rebuild the sparse index
+        let checkpoint_seg_count = self.header.sparse_checkpoint_seg_count;
+
+        if self.header.sparse_checkpoint_offset > 0 && checkpoint_seg_count > 0 {
+            // Load from checkpoint
+            self.sparse = SparseIndex::read_from(
+                &mut self.file,
+                self.header.sparse_checkpoint_offset,
+                self.header.sparse_index_count,
+            )?;
+
+            // Incrementally rebuild from segments created after checkpoint
+            if checkpoint_seg_count < self.header.segment_count {
+                println!(
+                    "[recovery] rebuilding sparse index from segment {} to {}",
+                    checkpoint_seg_count, self.header.segment_count
+                );
+                let segments_to_rebuild: Vec<_> = self
+                    .segments
+                    .iter()
+                    .skip(checkpoint_seg_count as usize)
+                    .cloned()
+                    .collect();
+                for seg in segments_to_rebuild {
+                    let timestamps = self.read_timestamps(&seg)?;
+                    for (i, ts) in timestamps.iter().enumerate() {
+                        let global_idx = seg.header.first_row_global_idx + i as u64;
+                        if global_idx % SPARSE_FACTOR == 0 {
+                            self.sparse.entries.push(SparseEntry {
+                                timestamp: *ts,
+                                global_row_idx: global_idx,
+                            });
+                        }
+                    }
+                }
+            }
+        } else if self.header.sparse_index_count > 0 {
+            // Legacy format: sparse index at segments_end_offset
             self.sparse = SparseIndex::read_from(
                 &mut self.file,
                 self.header.segments_end_offset,
@@ -246,8 +284,6 @@ impl Storage {
         ];
 
         // ── Compute segment file position ──────────────────────────────────
-        // The new segment is placed at segments_end_offset (just past the
-        // current sparse index, or at SEGMENTS_BASE_OFFSET for the first seg).
         let seg_file_offset = self.header.segments_end_offset;
         let data_start = seg_file_offset + file_format::SEGMENT_HEADER_SIZE as u64;
 
@@ -290,18 +326,26 @@ impl Storage {
             self.file.write_all(block)?;
         }
 
-        let new_segments_end = cursor; // = seg_file_offset + seg_header + all data
+        let new_segments_end = cursor;
 
-        // ── Rebuild and write sparse index ─────────────────────────────────
+        // ── Extend in-memory sparse index (NOT written to disk every flush) ────
         let new_row_pairs: Vec<(u64, u64)> = rows
             .iter()
             .enumerate()
             .map(|(i, r)| (r.timestamp, first_row_global + i as u64))
             .collect();
         self.sparse.extend(&new_row_pairs);
-        let sparse_bytes = self.sparse_write_at(new_segments_end)?;
+
+        // ── Checkpoint: write sparse index to disk every N flushes ─────────────
+        let do_checkpoint = (self.header.segment_count + 1) % CHECKPOINT_INTERVAL == 0;
+        let checkpoint_offset = if do_checkpoint {
+            Some(self.write_sparse_checkpoint(new_segments_end)?)
+        } else {
+            None
+        };
 
         // ── Truncate file to exactly what we've written ────────────────────
+        let sparse_bytes = checkpoint_offset.unwrap_or(0);
         let new_file_len = new_segments_end + sparse_bytes as u64;
         self.file.set_len(new_file_len)?;
 
@@ -311,6 +355,12 @@ impl Storage {
         self.header.sparse_index_count = self.sparse.len() as u64;
         self.header.total_tx_count += row_count;
         self.header.last_tx_hash = chain_tip.last_hash;
+
+        // Update checkpoint info if we just wrote a checkpoint
+        if let Some(offset) = checkpoint_offset {
+            self.header.sparse_checkpoint_offset = offset;
+            self.header.sparse_checkpoint_seg_count = self.header.segment_count;
+        }
 
         // ── Write all account balances to disk ────────────────────────────────
         for (slot, acct) in self.accounts.values() {
@@ -338,10 +388,17 @@ impl Storage {
         Ok(())
     }
 
-    fn sparse_write_at(&mut self, offset: u64) -> Result<usize> {
-        self.file.seek(SeekFrom::Start(offset))?;
-        let n = self.sparse.write_to(&mut self.file)?;
-        Ok(n)
+    fn write_sparse_checkpoint(&mut self, next_segment_offset: u64) -> Result<u64> {
+        let checkpoint_offset = next_segment_offset;
+        self.file.seek(SeekFrom::Start(checkpoint_offset))?;
+        let bytes_written = self.sparse.write_to(&mut self.file)?;
+        println!(
+            "[checkpoint] wrote {} sparse entries ({} KB) at offset {}",
+            self.sparse.len(),
+            bytes_written / 1024,
+            checkpoint_offset
+        );
+        Ok(bytes_written as u64)
     }
 
     // ── Column read helpers ────────────────────────────────────────────────

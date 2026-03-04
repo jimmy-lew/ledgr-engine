@@ -81,7 +81,7 @@ impl MemTable {
     }
 }
 
-const FLUSH_THRESHOLD: usize = 4 * 1024 * 1024;
+const FLUSH_THRESHOLD: usize = 8 * 1024 * 1024;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Inner state
@@ -479,12 +479,28 @@ impl LedgerEngine {
     fn do_flush(inner: &mut Inner) -> Result<()> {
         let rows = inner.memtable.drain_sorted();
         let n = rows.len();
+
+        let sparse_before = inner.storage.sparse.len();
+        let segments_before = inner.storage.segments.len();
+
+        let flush_start = std::time::Instant::now();
         inner.storage.flush_segment(rows, &mut inner.chain_tip)?;
+        let flush_duration = flush_start.elapsed();
+
         inner.wal.sync()?;
         inner.wal.truncate()?;
+
+        let sparse_after = inner.storage.sparse.len();
+        let segments_after = inner.storage.segments.len();
+
         println!(
-            "[flush] ✓  {n} legs → segment {}",
-            inner.storage.segments.len() - 1
+            "[flush] ✓  {n} legs → segment {} (sparse: {} → {}, segments: {} → {}) in {:?}",
+            segments_after - 1,
+            sparse_before,
+            sparse_after,
+            segments_before,
+            segments_after,
+            flush_duration
         );
         Ok(())
     }

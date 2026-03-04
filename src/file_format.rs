@@ -13,13 +13,14 @@
 //! 0x008      8    accounts_count         u64 – active account slots
 //! 0x010      8    segment_count          u64 – number of written segments
 //! 0x018      8    segments_end_offset    u64 – byte where last segment ends
-//!                                          (= start of sparse index)
 //! 0x020      8    sparse_index_count     u64 – number of sparse entries
 //! 0x028      8    total_tx_count         u64 – grand total rows across all segs
 //! 0x030     32    genesis_hash           [u8;32] – prev pointer for row 0
 //! 0x050     32    last_tx_hash           [u8;32] – hash of most-recent tx
 //! 0x070      4    header_crc32           CRC32 over bytes [0x000..0x070)
-//! 0x074    140    padding (zeroes)
+//! 0x074      8    sparse_checkpoint_offset u64 – file offset of sparse checkpoint (0 = none)
+//! 0x07C      8    sparse_checkpoint_seg_count u64 – segment count at checkpoint
+//! 0x084    140    padding (zeroes)
 //! ──────  ─────   Total = 512 bytes  (0x200)
 //! ```
 //!
@@ -152,6 +153,10 @@ pub struct FileHeader {
     pub last_tx_hash: [u8; 32],
     // 0x070  CRC32 over bytes [0x000 .. 0x070)
     pub header_crc32: u32,
+    // 0x074  File offset of sparse index checkpoint (0 = no checkpoint)
+    pub sparse_checkpoint_offset: u64,
+    // 0x07C  Segment count when checkpoint was written
+    pub sparse_checkpoint_seg_count: u64,
 }
 
 impl FileHeader {
@@ -167,13 +172,15 @@ impl FileHeader {
             genesis_hash: [0u8; 32],
             last_tx_hash: [0u8; 32],
             header_crc32: 0,
+            sparse_checkpoint_offset: 0,
+            sparse_checkpoint_seg_count: 0,
         }
     }
 
     // ── CRC helpers ────────────────────────────────────────────────────────
 
     fn build_payload_bytes(&self) -> Vec<u8> {
-        let mut v = Vec::with_capacity(0x070);
+        let mut v = Vec::with_capacity(0x084);
         v.extend_from_slice(&self.magic);
         v.push(self.version);
         v.extend_from_slice(&[0u8; 3]); // reserved
@@ -184,7 +191,9 @@ impl FileHeader {
         v.extend_from_slice(&self.total_tx_count.to_le_bytes());
         v.extend_from_slice(&self.genesis_hash);
         v.extend_from_slice(&self.last_tx_hash);
-        debug_assert_eq!(v.len(), 0x070);
+        v.extend_from_slice(&self.sparse_checkpoint_offset.to_le_bytes());
+        v.extend_from_slice(&self.sparse_checkpoint_seg_count.to_le_bytes());
+        debug_assert_eq!(v.len(), 0x084);
         v
     }
 
@@ -203,8 +212,8 @@ impl FileHeader {
         w.seek(SeekFrom::Start(0))?;
         w.write_all(&payload)?;
         w.write_u32::<LE>(self.header_crc32)?;
-        // Padding to 512 bytes: payload(0x70) + crc(4) = 116; pad = 396
-        let written = 0x070usize + 4;
+        // Padding to 512 bytes: payload(0x84) + crc(4) = 136; pad = 376
+        let written = 0x084usize + 4;
         w.write_all(&vec![0u8; FILE_HEADER_SIZE - written])?;
         Ok(())
     }
@@ -228,9 +237,9 @@ impl FileHeader {
             return Err(LedgerError::UnsupportedVersion(version));
         }
 
-        // Verify CRC over [0..0x70)
-        let stored_crc = u32::from_le_bytes(raw[0x070..0x074].try_into().unwrap());
-        let computed = Self::compute_crc(&raw[..0x070]);
+        // Verify CRC over [0..0x084)
+        let stored_crc = u32::from_le_bytes(raw[0x084..0x088].try_into().unwrap());
+        let computed = Self::compute_crc(&raw[..0x084]);
         if stored_crc != computed {
             return Err(LedgerError::HeaderChecksumMismatch {
                 stored: stored_crc,
@@ -258,6 +267,8 @@ impl FileHeader {
             genesis_hash,
             last_tx_hash,
             header_crc32: stored_crc,
+            sparse_checkpoint_offset: read_u64(&raw, 0x074),
+            sparse_checkpoint_seg_count: read_u64(&raw, 0x07C),
         })
     }
 }
