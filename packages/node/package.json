@@ -1,0 +1,26 @@
+{
+  "name": "@ledgr/engine",
+  "version": "0.1.0",
+  "description": "Node.js bindings for the Ledger Engine",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "napi": {
+    "name": "ledgr-engine",
+    "triples": {
+      "defaults": true
+    }
+  },
+  "scripts": {
+    "build": "napi build",
+    "build:release": "napi build --release",
+    "test": "node test.js"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@napi-rs/cli": "^3.0.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=14"
+  }
+}
