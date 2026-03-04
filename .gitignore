@@ -1,7 +1,9 @@
 # Build artifacts
-/target/
+**/target/
 /tools/
 **/*.rs.bk
+node_modules
+*.node
 
 # IDE
 .zed/
@@ -21,6 +23,8 @@ Thumbs.db
 *.db
 *.sqlite
 *.ldb
+*.ldg
+*.wal
 
 # Coverage
 coverage.txt
