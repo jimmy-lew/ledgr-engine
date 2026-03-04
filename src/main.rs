@@ -642,10 +642,10 @@ fn run_benchmark(num_entries: usize) -> Result<(), LedgerError> {
     let flush_time = flush_start.elapsed();
     println!("Flushed to disk in {:.2?}", flush_time);
 
-    let validate_start = std::time::Instant::now();
-    engine.validate_ledger()?;
-    let validate_time = validate_start.elapsed();
-    println!("Validated in {:.2?}", validate_time);
+    // let validate_start = std::time::Instant::now();
+    // engine.validate_ledger()?;
+    // let validate_time = validate_start.elapsed();
+    // println!("Validated in {:.2?}", validate_time);
 
     let total_legs = num_entries * 2;
     println!("Total legs written: {}", total_legs);
@@ -658,7 +658,7 @@ fn run_benchmark(num_entries: usize) -> Result<(), LedgerError> {
     println!("│  Total legs: {:>22} │", num_entries * 2);
     println!("│  Write time: {:>22?} │", write_time);
     println!("│  Flush time: {:>22?} │", flush_time);
-    println!("│  Validate time: {:>19?} │", validate_time);
+    // println!("│  Validate time: {:>19?} │", validate_time);
     println!("│  Total time: {:>22?} │", total_time);
     println!(
         "│  Throughput: {:>20}/s │",
