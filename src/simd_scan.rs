@@ -223,7 +223,7 @@ unsafe fn avx2_sum_by_type(amounts: &[i64], tx_types: &[u8]) -> (i64, i64) {
         // tx_types are 0 (debit) or 1 (credit)
         // Subtract from 0: if t[i]==0 → 0-0 = 0; if t[i]==1 → 0-1 = -1 (all 1s bits)
         // This gives us a mask directly: 0 for credit, -1 for debit
-        let types_i64 = _mm_set_epi64x(t[3] as i64, t[2] as i64, t[1] as i64, t[0] as i64);
+        let types_i64 = _mm256_set_epi64x(t[3] as i64, t[2] as i64, t[1] as i64, t[0] as i64);
         let zero = _mm256_setzero_si256();
         let debit_mask = _mm256_sub_epi64(zero, _mm256_cmpeq_epi64(types_i64, zero));
 
