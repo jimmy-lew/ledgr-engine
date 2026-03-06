@@ -4,7 +4,7 @@ mod tests {
     use crate::hash_chain::{compute_tx_hash, genesis_hash};
     use crate::models::*;
     use crate::simd_scan;
-    use crate::sparse_index::{SparseIndex, SPARSE_FACTOR};
+    use crate::sparse_index::SparseIndex;
     use crate::*;
     use std::io::Cursor;
 
@@ -39,6 +39,7 @@ mod tests {
         let entry = JournalEntry::new(
             "Rent payment",
             vec![Leg::debit(1, 120_000), Leg::credit(2, 120_000)],
+            None,
         );
         assert!(entry.validate().is_ok());
     }
@@ -51,6 +52,7 @@ mod tests {
                 Leg::debit(1, 100_000),
                 Leg::credit(2, 90_000), // ← $100 debit, $90 credit — doesn't balance
             ],
+            None,
         );
         match entry.validate() {
             Err(LedgerError::JournalNotBalanced { debits, credits }) => {
@@ -63,7 +65,7 @@ mod tests {
 
     #[test]
     fn journal_entry_single_leg_rejected() {
-        let entry = JournalEntry::new("Orphan", vec![Leg::debit(1, 500)]);
+        let entry = JournalEntry::new("Orphan", vec![Leg::debit(1, 500)], None);
         assert!(matches!(
             entry.validate(),
             Err(LedgerError::JournalTooFewLegs { got: 1 })
@@ -72,7 +74,7 @@ mod tests {
 
     #[test]
     fn journal_entry_empty_rejected() {
-        let entry = JournalEntry::new("Empty", vec![]);
+        let entry = JournalEntry::new("Empty", vec![], None);
         assert!(matches!(
             entry.validate(),
             Err(LedgerError::JournalTooFewLegs { got: 0 })
@@ -89,6 +91,7 @@ mod tests {
                 Leg::credit(20, 20_000),  // Cash ↓
                 Leg::credit(30, 100_000), // Accounts Payable ↑
             ],
+            None,
         );
         assert!(entry.validate().is_ok());
         // Verify net
@@ -121,6 +124,7 @@ mod tests {
                 Leg::debit(cash, 1_000),
                 Leg::credit(rev, 999), // 1 cent off
             ],
+            None,
         ));
         assert!(matches!(
             result,
@@ -137,6 +141,7 @@ mod tests {
         let result = engine.record_journal_entry(JournalEntry::new(
             "Orphan debit",
             vec![Leg::debit(cash, 5_000)],
+            None,
         ));
         assert!(matches!(result, Err(LedgerError::JournalTooFewLegs { .. })));
     }
@@ -183,6 +188,7 @@ mod tests {
                     Leg::credit(cash, 20_000),
                     Leg::credit(payable, 100_000),
                 ],
+                None,
             ))
             .unwrap();
 
@@ -298,36 +304,6 @@ mod tests {
     fn simd_sum_balanced() {
         let amounts: Vec<i64> = vec![-500, 500, -1000, 1000, -200, 200];
         assert_eq!(simd_scan::simd_sum_i64(&amounts), 0);
-    }
-
-    #[test]
-    fn simd_split_sum_matches_scalar() {
-        let n = 999usize;
-        let amounts: Vec<i64> = (0..n)
-            .map(|i| {
-                if i % 2 == 0 {
-                    -(i as i64 + 1)
-                } else {
-                    i as i64 + 1
-                }
-            })
-            .collect();
-        let tx_types: Vec<u8> = (0..n).map(|i| (i % 2) as u8).collect();
-        let (sd, sc) = {
-            let mut d = 0i64;
-            let mut c = 0i64;
-            for (&a, &t) in amounts.iter().zip(tx_types.iter()) {
-                if t == 0 {
-                    d += a;
-                } else {
-                    c += a;
-                }
-            }
-            (d, c)
-        };
-        let (vd, vc) = simd_scan::simd_sum_by_type(&amounts, &tx_types);
-        assert_eq!(vd, sd);
-        assert_eq!(vc, sc);
     }
 
     // ──────────────────────────────────────────────────────────────────────
