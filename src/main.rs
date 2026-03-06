@@ -302,7 +302,7 @@ fn cmd_register(args: &[String]) -> Result<(), String> {
         .ok_or_else(|| format!("Account not found: {}", credit_name))?;
 
     let journal_entry_id = engine
-        .record_entry_with_timestamp(debit_id, credit_id, amount, description, timestamp)
+        .record_entry(debit_id, credit_id, amount, description, timestamp)
         .map_err(|e| e.to_string())?;
 
     println!(

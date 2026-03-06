@@ -24,7 +24,6 @@
 //!
 //! A `parking_lot::RwLock` wraps all mutable state.
 
-use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -255,23 +254,8 @@ impl LedgerEngine {
     /// ```
     ///
     /// Returns the `journal_entry_id`.
-    pub fn record_entry(
-        &self,
-        debit_account: u64,
-        credit_account: u64,
-        amount_cents: u64,
-        description: &str,
-    ) -> Result<u64> {
-        self.record_entry_with_timestamp(
-            debit_account,
-            credit_account,
-            amount_cents,
-            description,
-            None,
-        )
-    }
 
-    pub fn record_entry_with_timestamp(
+    pub fn record_entry(
         &self,
         debit_account: u64,
         credit_account: u64,
@@ -279,23 +263,14 @@ impl LedgerEngine {
         description: &str,
         timestamp: Option<u64>,
     ) -> Result<u64> {
-        let entry = match timestamp {
-            Some(ts) => JournalEntry::with_timestamp(
-                description,
-                vec![
-                    Leg::debit(debit_account, amount_cents),
-                    Leg::credit(credit_account, amount_cents),
-                ],
-                ts,
-            ),
-            None => JournalEntry::new(
-                description,
-                vec![
-                    Leg::debit(debit_account, amount_cents),
-                    Leg::credit(credit_account, amount_cents),
-                ],
-            ),
-        };
+        let entry = JournalEntry::new(
+            description,
+            vec![
+                Leg::debit(debit_account, amount_cents),
+                Leg::credit(credit_account, amount_cents),
+            ],
+            timestamp,
+        );
         self.record_journal_entry(entry)
     }
 

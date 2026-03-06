@@ -146,19 +146,11 @@ pub struct JournalEntry {
 }
 
 impl JournalEntry {
-    pub fn new(description: impl Into<String>, legs: Vec<Leg>) -> Self {
+    pub fn new(description: impl Into<String>, legs: Vec<Leg>, timestamp: Option<u64>) -> Self {
         Self {
             description: description.into(),
             legs,
             timestamp: None,
-        }
-    }
-
-    pub fn with_timestamp(description: impl Into<String>, legs: Vec<Leg>, timestamp: u64) -> Self {
-        Self {
-            description: description.into(),
-            legs,
-            timestamp: Some(timestamp),
         }
     }
 

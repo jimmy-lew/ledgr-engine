@@ -154,7 +154,9 @@ mod tests {
             .create_account("Revenue", AccountType::Revenue)
             .unwrap();
 
-        let entry_id = engine.record_entry(cash, rev, 50_000, "Cash sale").unwrap();
+        let entry_id = engine
+            .record_entry(cash, rev, 50_000, "Cash sale", None)
+            .unwrap();
         assert!(entry_id > 0);
         engine.validate_ledger().unwrap();
     }
@@ -204,10 +206,10 @@ mod tests {
             .unwrap();
 
         engine
-            .record_entry(cash, equity, 1_000_000, "Equity injection")
+            .record_entry(cash, equity, 1_000_000, "Equity injection", None)
             .unwrap();
         engine
-            .record_entry(exp, cash, 500_000, "Operating costs")
+            .record_entry(exp, cash, 500_000, "Operating costs", None)
             .unwrap();
 
         engine.validate_ledger().unwrap();
@@ -345,7 +347,7 @@ mod tests {
                 .unwrap();
             // Write but do NOT flush — WAL holds the data
             engine
-                .record_entry(cash, equity, 100_000, "Equity")
+                .record_entry(cash, equity, 100_000, "Equity", None)
                 .unwrap();
         }
 
@@ -367,7 +369,7 @@ mod tests {
 
         let cash = engine.create_account("Cash", AccountType::Asset).unwrap();
         let rev = engine.create_account("Rev", AccountType::Revenue).unwrap();
-        engine.record_entry(cash, rev, 1_000, "test").unwrap();
+        engine.record_entry(cash, rev, 1_000, "test", None).unwrap();
         engine.force_flush().unwrap();
 
         let wal_len = fs::metadata(dbpath.with_extension("wal"))
