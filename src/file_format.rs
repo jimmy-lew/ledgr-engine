@@ -193,7 +193,8 @@ impl FileHeader {
         v.extend_from_slice(&self.last_tx_hash);
         v.extend_from_slice(&self.sparse_checkpoint_offset.to_le_bytes());
         v.extend_from_slice(&self.sparse_checkpoint_seg_count.to_le_bytes());
-        debug_assert_eq!(v.len(), 0x084);
+        debug_assert_eq!(v.len(), 0x080);
+        v.resize(0x084, 0u8); // pad to 132 bytes for CRC computation
         v
     }
 
