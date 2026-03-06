@@ -90,8 +90,8 @@ fn print_help(prog: &str) {
     println!("  init                     Initialize a new ledger file");
     println!("  account [add] <name> <type>  Create a new account");
     println!("  accounts                 List all accounts");
-    println!("  register <date> <desc> <amt> <acct1> <acct2>");
-    println!("                           Record a transaction (debit credit)");
+    println!("  register <desc> <amt> <debit> <credit> [-d YYYY-MM-DD]");
+    println!("                           Record a transaction");
     println!("  balance                  Show account balances");
     println!("  incomestatement          Show income statement");
     println!("  print                    Show all journal entries");
@@ -105,8 +105,16 @@ fn print_help(prog: &str) {
     println!("Examples:");
     println!("  {} init", prog);
     println!("  {} account add Cash asset", prog);
-    println!("  {} account add Revenue revenue", prog);
-    println!("  {} register 2024-01-15 \"Sale\" 500 Cash Revenue", prog);
+    println!("  {} account add Employer liability", prog);
+    println!("  {} account add \"Salary Income\" revenue", prog);
+    println!(
+        "  {} register \"Earned salary\" 3000 Employer \"Salary Income\" -d 2024-01-15",
+        prog
+    );
+    println!(
+        "  {} register \"Got paid\" 3000 Cash Employer -d 2024-01-20",
+        prog
+    );
     println!("  {} balance", prog);
     println!("  {} incomestatement", prog);
 }
@@ -254,9 +262,9 @@ fn cmd_register(args: &[String]) -> Result<(), String> {
         ));
     }
 
-    if args.len() < 6 {
+    if args.len() < 5 {
         return Err(
-            "Usage: ldb register <date> <description> <amount> <debit-account> <credit-account>"
+            "Usage: ldb register <description> <amount> <debit-account> <credit-account> [-d YYYY-MM-DD]"
                 .to_string(),
         );
     }
@@ -267,6 +275,13 @@ fn cmd_register(args: &[String]) -> Result<(), String> {
     let amount_str = &args[3];
     let debit_name = &args[4];
     let credit_name = &args[5];
+
+    let mut timestamp: Option<u64> = None;
+    if let Some(pos) = args.iter().position(|a| a == "-d" || a == "--date") {
+        if pos + 1 < args.len() {
+            timestamp = Some(parse_date(&args[pos + 1])?);
+        }
+    }
 
     let amount: u64 = amount_str
         .replace(',', "")
@@ -287,7 +302,7 @@ fn cmd_register(args: &[String]) -> Result<(), String> {
         .ok_or_else(|| format!("Account not found: {}", credit_name))?;
 
     let journal_entry_id = engine
-        .record_entry(debit_id, credit_id, amount, description)
+        .record_entry_with_timestamp(debit_id, credit_id, amount, description, timestamp)
         .map_err(|e| e.to_string())?;
 
     println!(
@@ -371,7 +386,7 @@ fn cmd_balance(_args: &[String]) -> Result<(), String> {
     for a in &accounts {
         let display_balance = match a.kind {
             AccountType::Asset | AccountType::Expense => -a.balance,
-            _ => a.balance,
+            AccountType::Liability | AccountType::Equity | AccountType::Revenue => a.balance,
         };
         let bal_str = format!("{:>13.2}", display_balance as f64 / 100.0);
         println!(
@@ -629,4 +644,49 @@ fn fmt_ts(ts: u64) -> String {
 
 fn is_leap(y: u32) -> bool {
     y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)
+}
+
+fn parse_date(s: &str) -> Result<u64, String> {
+    let parts: Vec<u32> = s
+        .split('-')
+        .map(|p| p.parse().map_err(|_| format!("Invalid date: {}", s)))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    if parts.len() != 3 {
+        return Err(format!("Invalid date format: {}. Use YYYY-MM-DD", s));
+    }
+
+    let (year, month, day) = (parts[0], parts[1], parts[2]);
+
+    if month < 1 || month > 12 {
+        return Err(format!("Invalid month: {}", month));
+    }
+
+    let days_in_month = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if is_leap(year) {
+                29
+            } else {
+                28
+            }
+        }
+        _ => return Err(format!("Invalid month: {}", month)),
+    };
+
+    if day < 1 || day > days_in_month {
+        return Err(format!("Invalid day: {} for month {}", day, month));
+    }
+
+    let days_before_year = (1970..year)
+        .map(|y| if is_leap(y) { 366 } else { 365 })
+        .sum::<u64>();
+    let days_before_month: u64 = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+        .iter()
+        .take((month - 1) as usize)
+        .sum();
+    let days = days_before_year + days_before_month + (day - 1) as u64;
+
+    Ok(days * 86400)
 }

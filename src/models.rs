@@ -141,6 +141,8 @@ pub struct JournalEntry {
     /// Order is significant: legs are stored in this order; they share a
     /// common `journal_entry_id` column value so they can be grouped later.
     pub legs: Vec<Leg>,
+    /// Optional timestamp (Unix epoch seconds). If None, uses current time.
+    pub timestamp: Option<u64>,
 }
 
 impl JournalEntry {
@@ -148,6 +150,15 @@ impl JournalEntry {
         Self {
             description: description.into(),
             legs,
+            timestamp: None,
+        }
+    }
+
+    pub fn with_timestamp(description: impl Into<String>, legs: Vec<Leg>, timestamp: u64) -> Self {
+        Self {
+            description: description.into(),
+            legs,
+            timestamp: Some(timestamp),
         }
     }
 

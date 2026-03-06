@@ -190,7 +190,7 @@ impl LedgerEngine {
             }
         }
 
-        let now = unix_now();
+        let timestamp = entry.timestamp.unwrap_or_else(unix_now);
         let journal_entry_id = {
             let id = inner.next_entry_id;
             inner.next_entry_id += 1;
@@ -213,7 +213,7 @@ impl LedgerEngine {
                     account_id: leg.account_id,
                     amount: leg.signed_amount(),
                     transaction_type: leg.direction,
-                    timestamp: now,
+                    timestamp,
                     description: entry.description.clone(),
                     tx_hash: [0u8; 32],
                 }
@@ -223,7 +223,7 @@ impl LedgerEngine {
         // ── 4. Atomic WAL write (all legs in one record) ──────────────────
         let wal_entry = WalEntry {
             journal_entry_id,
-            timestamp: now,
+            timestamp,
             description: entry.description.clone(),
             legs: legs.clone(),
         };
@@ -262,13 +262,41 @@ impl LedgerEngine {
         amount_cents: u64,
         description: &str,
     ) -> Result<u64> {
-        self.record_journal_entry(JournalEntry::new(
+        self.record_entry_with_timestamp(
+            debit_account,
+            credit_account,
+            amount_cents,
             description,
-            vec![
-                Leg::debit(debit_account, amount_cents),
-                Leg::credit(credit_account, amount_cents),
-            ],
-        ))
+            None,
+        )
+    }
+
+    pub fn record_entry_with_timestamp(
+        &self,
+        debit_account: u64,
+        credit_account: u64,
+        amount_cents: u64,
+        description: &str,
+        timestamp: Option<u64>,
+    ) -> Result<u64> {
+        let entry = match timestamp {
+            Some(ts) => JournalEntry::with_timestamp(
+                description,
+                vec![
+                    Leg::debit(debit_account, amount_cents),
+                    Leg::credit(credit_account, amount_cents),
+                ],
+                ts,
+            ),
+            None => JournalEntry::new(
+                description,
+                vec![
+                    Leg::debit(debit_account, amount_cents),
+                    Leg::credit(credit_account, amount_cents),
+                ],
+            ),
+        };
+        self.record_journal_entry(entry)
     }
 
     // ── validate_ledger ─────────────────────────────────────────────────────
