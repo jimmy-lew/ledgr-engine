@@ -21,6 +21,12 @@ fn main() {
         "help" | "-h" | "--help" => {
             print_help(prog);
         }
+        "--benchmark" => {
+            if let Err(e) = cmd_benchmark(&args) {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
         "version" | "--version" | "-V" => {
             println!("ldb {}", VERSION);
         }
@@ -97,6 +103,7 @@ fn print_help(prog: &str) {
     println!("  print                    Show all journal entries");
     println!("  validate                 Validate ledger integrity");
     println!("  version                  Show version");
+    println!("  --benchmark <num_tx>     Benchmark db performance");
     println!("  help                     Show this help");
     println!();
     println!("Account types:");
@@ -592,6 +599,89 @@ fn cmd_validate(_args: &[String]) -> Result<(), String> {
     let engine = LedgerEngine::open(&path).map_err(|e| e.to_string())?;
     engine.validate_ledger().map_err(|e| e.to_string())?;
     println!("\n✓ Ledger is valid and balanced");
+
+    Ok(())
+}
+
+fn cmd_benchmark(args: &[String]) -> Result<(), LedgerError> {
+    let dbpath = std::path::PathBuf::from("benchmark.ldb");
+    let _ = std::fs::remove_file(&dbpath);
+    let _ = std::fs::remove_file(dbpath.with_extension("wal"));
+    let num_entries = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(10000);
+
+    println!("╔══════════════════════════════════════════════════════════╗");
+    println!("║                    LOAD TEST BENCHMARK                   ║");
+    println!("╚══════════════════════════════════════════════════════════╝");
+    println!("Entries: {}\n", num_entries);
+
+    let engine = LedgerEngine::open(&dbpath)?;
+
+    let cash = engine.create_account("Cash", AccountType::Asset)?;
+    let equity = engine.create_account("Equity", AccountType::Equity)?;
+    let revenue = engine.create_account("Revenue", AccountType::Revenue)?;
+    let expense = engine.create_account("Expense", AccountType::Expense)?;
+
+    let start = std::time::Instant::now();
+    let mut wal_time = std::time::Duration::ZERO;
+    let mut memtable_time = std::time::Duration::ZERO;
+
+    for i in 0..num_entries {
+        let amount: u64 = ((i as i64 % 1000 + 1).unsigned_abs()) * 100;
+        let t0 = std::time::Instant::now();
+
+        if i % 4 == 0 {
+            engine.record_entry(cash, equity, amount, "Capital injection", None)?;
+        } else if i % 4 == 1 {
+            engine.record_entry(revenue, cash, amount, "Sale", None)?;
+        } else {
+            engine.record_entry(expense, cash, amount, "Expense", None)?;
+        }
+
+        let t1 = std::time::Instant::now();
+
+        // These are approximate - actual timing would need instrumentation in engine
+        wal_time += t1 - t0;
+        memtable_time += t1 - t0;
+    }
+
+    let write_time = start.elapsed();
+    println!("Wrote {} entries in {:.2?}", num_entries, write_time);
+    println!(
+        "  (WAL + MemTable insert per entry: {:.2?})",
+        write_time / num_entries as u32
+    );
+
+    let flush_start = std::time::Instant::now();
+    engine.force_flush()?;
+    let flush_time = flush_start.elapsed();
+    println!("Flushed to disk in {:.2?}", flush_time);
+
+    let validate_start = std::time::Instant::now();
+    engine.validate_ledger()?;
+    let validate_time = validate_start.elapsed();
+    println!("Validated in {:.2?}", validate_time);
+
+    let total_legs = num_entries * 2;
+    println!("Total legs written: {}", total_legs);
+
+    let total_time = start.elapsed();
+    println!("\n┌─────────────────────────────────────┐");
+    println!("│           BENCHMARK RESULTS         │");
+    println!("├─────────────────────────────────────┤");
+    println!("│  Total entries: {:>19} │", num_entries);
+    println!("│  Total legs: {:>22} │", num_entries * 2);
+    println!("│  Write time: {:>22?} │", write_time);
+    println!("│  Flush time: {:>22?} │", flush_time);
+    println!("│  Validate time: {:>19?} │", validate_time);
+    println!("│  Total time: {:>22?} │", total_time);
+    println!(
+        "│  Throughput: {:>20}/s │",
+        num_entries as f64 / total_time.as_secs_f64()
+    );
+    println!("└─────────────────────────────────────┘");
+
+    let metadata = std::fs::metadata(&dbpath).unwrap();
+    println!("\nDatabase size: {} bytes", metadata.len());
 
     Ok(())
 }
