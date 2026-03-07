@@ -29,10 +29,13 @@ use std::path::Path;
 
 use byteorder::{ReadBytesExt, WriteBytesExt, LE};
 
+use crate::encoders::{
+    BlockCompressor, CompressionCodec, DeltaEncoder, DeltaEncoderU64, DictionaryEncoder, RleEncoder,
+};
 use crate::error::{LedgerError, Result};
 use crate::file_format::{
-    self, col, enc, ColumnMeta, FileHeader, SegmentHeader, ACCOUNT_RECORD_SIZE, FILE_HEADER_SIZE,
-    MAX_ACCOUNTS, NUM_TX_COLUMNS,
+    self, col, comp, enc, ColumnMeta, FileHeader, SegmentHeader, ACCOUNT_RECORD_SIZE,
+    FILE_HEADER_SIZE, MAX_ACCOUNTS, NUM_TX_COLUMNS,
 };
 use crate::hash_chain::{self, ChainTip};
 use crate::models::{Account, AccountType, Transaction, TransactionType};
@@ -63,12 +66,17 @@ pub struct Storage {
     pub segments: Vec<SegmentMeta>,
     pub accounts: HashMap<u64, (usize, Account)>, // id → (slot_index, account)
     pub sparse: SparseIndex,
+    pub compression_codec: CompressionCodec,
 }
 
 impl Storage {
     // ── Open / create ──────────────────────────────────────────────────────
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_with_compression(path, CompressionCodec::Zstd)
+    }
+
+    pub fn open_with_compression(path: impl AsRef<Path>, codec: CompressionCodec) -> Result<Self> {
         let path = path.as_ref();
         let is_new = !path.exists();
 
@@ -84,6 +92,7 @@ impl Storage {
             segments: Vec::new(),
             accounts: HashMap::new(),
             sparse: SparseIndex::new(),
+            compression_codec: codec,
         };
 
         if is_new {
@@ -93,6 +102,10 @@ impl Storage {
         }
 
         Ok(storage)
+    }
+
+    pub fn set_compression_codec(&mut self, codec: CompressionCodec) {
+        self.compression_codec = codec;
     }
 
     // ── Initialise a brand-new file ────────────────────────────────────────
@@ -257,7 +270,7 @@ impl Storage {
         // ── Serialise each column into an in-memory buffer ─────────────────
         // We need to know each column's byte length before we can write the
         // segment header (which contains their absolute offsets), so we
-        // serialise all columns first, then emit the header.
+        // serialise all columns first, then apply encoding+compression.
 
         let col_id = serialise_u64_col(rows.iter().map(|r| r.id));
         let col_acct = serialise_u64_col(rows.iter().map(|r| r.account_id));
@@ -269,19 +282,13 @@ impl Storage {
         let col_hash = serialise_hash_col(rows.iter().map(|r| &r.tx_hash));
         let col_entry = serialise_u64_col(rows.iter().map(|r| r.journal_entry_id));
 
-        let col_data: [&[u8]; NUM_TX_COLUMNS] = [
-            &col_id, &col_acct, &col_amt, &col_type, &col_ts, &col_desc, &col_hash, &col_entry,
+        let col_data: Vec<Vec<u8>> = vec![
+            col_id, col_acct, col_amt, col_type, col_ts, col_desc, col_hash, col_entry,
         ];
-        let encodings: [u8; NUM_TX_COLUMNS] = [
-            enc::NONE,
-            enc::NONE,
-            enc::NONE,
-            type_enc,
-            enc::NONE,
-            enc::NONE,
-            enc::NONE,
-            enc::NONE,
-        ];
+
+        // Apply encoding and compression to each column
+        let (encoded_cols, encodings, compressed_cols) =
+            encode_all_columns(&col_data, self.compression_codec)?;
 
         // ── Compute segment file position ──────────────────────────────────
         let seg_file_offset = self.header.segments_end_offset;
@@ -291,17 +298,24 @@ impl Storage {
         let mut columns = [ColumnMeta::default(); NUM_TX_COLUMNS];
         let mut cursor = data_start;
         for i in 0..NUM_TX_COLUMNS {
+            let comp_byte = match self.compression_codec {
+                CompressionCodec::None => comp::NONE,
+                CompressionCodec::Zstd => comp::ZSTD,
+                CompressionCodec::Lz4 => comp::LZ4,
+            };
             columns[i] = ColumnMeta {
                 offset: cursor,
-                length: col_data[i].len() as u64,
+                length: compressed_cols[i].len() as u64,
                 encoding: encodings[i],
+                compression: comp_byte,
+                uncompressed_length: col_data[i].len() as u64,
             };
-            cursor += col_data[i].len() as u64;
+            cursor += compressed_cols[i].len() as u64;
         }
 
-        // ── CRC32 over all column data ─────────────────────────────────────
+        // ── CRC32 over all column data (compressed) ─────────────────────────────────
         let mut all_data = Vec::new();
-        for &block in &col_data {
+        for block in &compressed_cols {
             all_data.extend_from_slice(block);
         }
         let data_crc32 = SegmentHeader::crc32_of(&all_data);
@@ -322,7 +336,7 @@ impl Storage {
         // ── Write: segment header + column blocks ──────────────────────────
         self.file.seek(SeekFrom::Start(seg_file_offset))?;
         seg_hdr.write_to(&mut self.file)?;
-        for &block in &col_data {
+        for block in &compressed_cols {
             self.file.write_all(block)?;
         }
 
@@ -403,17 +417,67 @@ impl Storage {
 
     // ── Column read helpers ────────────────────────────────────────────────
 
+    fn decompress_column(&mut self, col: &ColumnMeta) -> Result<Vec<u8>> {
+        let codec = match col.compression {
+            0 => CompressionCodec::None,
+            1 => CompressionCodec::Zstd,
+            2 => CompressionCodec::Lz4,
+            _ => CompressionCodec::None,
+        };
+
+        // Handle no compression case - just return raw data
+        if codec == CompressionCodec::None {
+            let mut uncompressed = vec![0u8; col.length as usize];
+            self.file.read_exact(&mut uncompressed)?;
+            return Ok(uncompressed);
+        }
+
+        let mut compressed = vec![0u8; col.length as usize];
+        self.file.read_exact(&mut compressed)?;
+
+        let compressor = BlockCompressor::new(codec);
+        compressor.decompress(&compressed, col.uncompressed_length as usize)
+    }
+
+    fn decode_column(&self, col: &ColumnMeta, decompressed: &[u8]) -> Result<Vec<u8>> {
+        match col.encoding {
+            0 => Ok(decompressed.to_vec()), // NONE
+            2 => {
+                // DELTA for u64
+                let enc = DeltaEncoderU64::decode_from_bytes(decompressed)
+                    .ok_or_else(|| LedgerError::Encoding("failed to decode delta u64".into()))?;
+                let decoded = enc.decode();
+                let mut result = Vec::with_capacity(decoded.len() * 8);
+                for v in decoded {
+                    result.extend_from_slice(&v.to_le_bytes());
+                }
+                Ok(result)
+            }
+            3 => {
+                // RLE
+                let enc = RleEncoder::decode_from_bytes(decompressed)
+                    .ok_or_else(|| LedgerError::Encoding("failed to decode RLE".into()))?;
+                let decoded = enc.decode();
+                let mut result = Vec::with_capacity(decoded.len() * 8);
+                for v in decoded {
+                    result.extend_from_slice(&v.to_le_bytes());
+                }
+                Ok(result)
+            }
+            _ => Ok(decompressed.to_vec()),
+        }
+    }
+
     /// Load the full `amount` (i64) column from a segment using bulk read.
     pub fn read_amounts(&mut self, meta: &SegmentMeta) -> Result<Vec<i64>> {
         let col = &meta.header.columns[col::AMT];
         self.file.seek(SeekFrom::Start(col.offset))?;
-        let n = meta.header.row_count as usize;
-        let byte_len = n * 8;
-        let mut buf = vec![0u8; byte_len];
-        self.file.read_exact(&mut buf)?;
+        let decompressed = self.decompress_column(col)?;
+        let decoded = self.decode_column(col, &decompressed)?;
 
+        let n = meta.header.row_count as usize;
         let mut out = Vec::with_capacity(n);
-        for chunk in buf.chunks_exact(8) {
+        for chunk in decoded.chunks_exact(8) {
             let val = i64::from_le_bytes(chunk.try_into().unwrap());
             out.push(val);
         }
@@ -424,12 +488,13 @@ impl Storage {
     pub fn read_tx_types(&mut self, meta: &SegmentMeta) -> Result<Vec<u8>> {
         let col = &meta.header.columns[col::TYPE];
         self.file.seek(SeekFrom::Start(col.offset))?;
-        let dict_size = self.file.read_u8()? as usize;
-        let mut dict = vec![0u8; dict_size];
-        self.file.read_exact(&mut dict)?;
+        let decompressed = self.decompress_column(col)?;
+
+        let dict_size = decompressed[0] as usize;
+        let dict = decompressed[1..1 + dict_size].to_vec();
+        let codes_start = 1 + dict_size;
         let n = meta.header.row_count as usize;
-        let mut codes = vec![0u8; n];
-        self.file.read_exact(&mut codes)?;
+        let codes = &decompressed[codes_start..codes_start + n];
         let decoded: Vec<u8> = codes.iter().map(|&c| dict[c as usize]).collect();
         Ok(decoded)
     }
@@ -438,13 +503,12 @@ impl Storage {
     pub fn read_timestamps(&mut self, meta: &SegmentMeta) -> Result<Vec<u64>> {
         let col = &meta.header.columns[col::TS];
         self.file.seek(SeekFrom::Start(col.offset))?;
-        let n = meta.header.row_count as usize;
-        let byte_len = n * 8;
-        let mut buf = vec![0u8; byte_len];
-        self.file.read_exact(&mut buf)?;
+        let decompressed = self.decompress_column(col)?;
+        let decoded = self.decode_column(col, &decompressed)?;
 
+        let n = meta.header.row_count as usize;
         let mut out = Vec::with_capacity(n);
-        for chunk in buf.chunks_exact(8) {
+        for chunk in decoded.chunks_exact(8) {
             let val = u64::from_le_bytes(chunk.try_into().unwrap());
             out.push(val);
         }
@@ -455,13 +519,11 @@ impl Storage {
     pub fn read_hashes(&mut self, meta: &SegmentMeta) -> Result<Vec<[u8; 32]>> {
         let col = &meta.header.columns[col::HASH];
         self.file.seek(SeekFrom::Start(col.offset))?;
-        let n = meta.header.row_count as usize;
-        let byte_len = n * 32;
-        let mut buf = vec![0u8; byte_len];
-        self.file.read_exact(&mut buf)?;
+        let decompressed = self.decompress_column(col)?;
 
+        let n = meta.header.row_count as usize;
         let mut out = Vec::with_capacity(n);
-        for chunk in buf.chunks_exact(32) {
+        for chunk in decompressed.chunks_exact(32) {
             let mut h = [0u8; 32];
             h.copy_from_slice(chunk);
             out.push(h);
@@ -490,24 +552,62 @@ impl Storage {
         let n = meta.header.row_count as usize;
         let cols = &meta.header.columns;
 
-        // Bulk read all fixed-width columns
-        let ids = Self::read_u64_column_from_file(&mut self.file, cols[col::ID].offset, n)?;
-        let accts = Self::read_u64_column_from_file(&mut self.file, cols[col::ACCT].offset, n)?;
+        // Read ID column
+        let id_col = &cols[col::ID];
+        self.file.seek(SeekFrom::Start(id_col.offset))?;
+        let id_decompressed = self.decompress_column(id_col)?;
+        let ids_decoded = self.decode_column(id_col, &id_decompressed)?;
+        let ids: Vec<u64> = ids_decoded
+            .chunks_exact(8)
+            .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+
+        // Read account_id column
+        let acct_col = &cols[col::ACCT];
+        self.file.seek(SeekFrom::Start(acct_col.offset))?;
+        let acct_decompressed = self.decompress_column(acct_col)?;
+        let accts_decoded = self.decode_column(acct_col, &acct_decompressed)?;
+        let accts: Vec<u64> = accts_decoded
+            .chunks_exact(8)
+            .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+
+        // Read other columns using existing methods
         let amts = self.read_amounts(meta)?;
         let types = self.read_tx_types(meta)?;
-        let ts = Self::read_u64_column_from_file(&mut self.file, cols[col::TS].offset, n)?;
+        let ts = self.read_timestamps(meta)?;
         let hashes = self.read_hashes(meta)?;
-        let entry_ids =
-            Self::read_u64_column_from_file(&mut self.file, cols[col::ENTRY_ID].offset, n)?;
 
-        // Descriptions (variable-length) - still need individual reads
-        self.file.seek(SeekFrom::Start(cols[col::DESC].offset))?;
+        // Read journal_entry_id column
+        let entry_col = &cols[col::ENTRY_ID];
+        self.file.seek(SeekFrom::Start(entry_col.offset))?;
+        let entry_decompressed = self.decompress_column(entry_col)?;
+        let entry_decoded = self.decode_column(entry_col, &entry_decompressed)?;
+        let entry_ids: Vec<u64> = entry_decoded
+            .chunks_exact(8)
+            .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+
+        // Read descriptions (variable-length)
+        let desc_col = &cols[col::DESC];
+        self.file.seek(SeekFrom::Start(desc_col.offset))?;
+        let desc_decompressed = self.decompress_column(desc_col)?;
+
         let mut descs = Vec::with_capacity(n);
+        let mut offset = 0;
         for _ in 0..n {
-            let len = self.file.read_u32::<LE>()? as usize;
-            let mut b = vec![0u8; len];
-            self.file.read_exact(&mut b)?;
-            descs.push(String::from_utf8_lossy(&b).into_owned());
+            if offset + 4 > desc_decompressed.len() {
+                break;
+            }
+            let len = u32::from_le_bytes(desc_decompressed[offset..offset + 4].try_into().unwrap())
+                as usize;
+            offset += 4;
+            if offset + len > desc_decompressed.len() {
+                break;
+            }
+            let s = String::from_utf8_lossy(&desc_decompressed[offset..offset + len]).into_owned();
+            descs.push(s);
+            offset += len;
         }
 
         let txs = (0..n)
@@ -604,4 +704,103 @@ fn serialise_hash_col<'a>(values: impl Iterator<Item = &'a [u8; 32]>) -> Vec<u8>
         v.extend_from_slice(h);
     }
     v
+}
+
+fn encode_all_columns(
+    col_data: &[Vec<u8>],
+    codec: CompressionCodec,
+) -> Result<(Vec<Vec<u8>>, [u8; NUM_TX_COLUMNS], Vec<Vec<u8>>)> {
+    let mut encoded_cols = Vec::with_capacity(NUM_TX_COLUMNS);
+    let mut encodings = [0u8; NUM_TX_COLUMNS];
+    let mut compressed_cols = Vec::with_capacity(NUM_TX_COLUMNS);
+
+    let compressor = BlockCompressor::new(codec);
+
+    for i in 0..NUM_TX_COLUMNS {
+        let original_data = &col_data[i];
+
+        // Apply column-specific encoding
+        let encoded = match i {
+            0 | 4 | 7 => {
+                // Delta encoding for monotonic sequences (id, timestamp, journal_entry_id)
+                let u64_values: Vec<u64> = original_data
+                    .chunks_exact(8)
+                    .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+                    .collect();
+                let enc = DeltaEncoderU64::encode(&u64_values);
+                let mut bytes = Vec::new();
+                enc.encode_to_bytes(&mut bytes);
+                bytes
+            }
+            1 => {
+                // RLE for account_id (repeats within journal entries)
+                let u64_values: Vec<u64> = original_data
+                    .chunks_exact(8)
+                    .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+                    .collect();
+                let enc = RleEncoder::encode(&u64_values);
+                let mut bytes = Vec::new();
+                enc.encode_to_bytes(&mut bytes);
+                bytes
+            }
+            2 => {
+                // Delta encoding for amounts (signed)
+                let i64_values: Vec<i64> = original_data
+                    .chunks_exact(8)
+                    .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+                    .collect();
+                let enc = DeltaEncoder::encode(&i64_values);
+                let mut bytes = Vec::new();
+                enc.encode_to_bytes(&mut bytes);
+                bytes
+            }
+            3 => {
+                // Dictionary for transaction_type (already encoded, just compress)
+                let mut bytes = Vec::new();
+                bytes.extend_from_slice(original_data);
+                encodings[i] = enc::DICTIONARY;
+                let compressed = compressor.compress(&bytes)?;
+                encoded_cols.push(bytes);
+                compressed_cols.push(compressed);
+                continue;
+            }
+            5 => {
+                // No additional encoding for description - just compress directly
+                // Format: length-prefixed strings [4 bytes len][string bytes][4 bytes len][string bytes]...
+                encoded_cols.push(original_data.clone());
+                encodings[i] = enc::NONE;
+                let compressed = compressor.compress(original_data)?;
+                compressed_cols.push(compressed);
+                continue;
+            }
+            6 => {
+                // No encoding for tx_hash (random data)
+                let mut bytes = Vec::new();
+                bytes.extend_from_slice(original_data);
+                encodings[i] = enc::NONE;
+                let compressed = compressor.compress(&bytes)?;
+                encoded_cols.push(bytes);
+                compressed_cols.push(compressed);
+                continue;
+            }
+            _ => original_data.clone(),
+        };
+
+        // Determine encoding type for header
+        encodings[i] = match i {
+            0 | 4 | 7 => enc::DELTA,
+            1 => enc::RLE,
+            2 => enc::DELTA,
+            3 => enc::DICTIONARY,
+            5 => enc::NONE,
+            _ => enc::NONE,
+        };
+
+        // Apply compression
+        let compressed = compressor.compress(&encoded)?;
+        encoded_cols.push(encoded);
+        compressed_cols.push(compressed);
+    }
+
+    Ok((encoded_cols, encodings, compressed_cols))
 }

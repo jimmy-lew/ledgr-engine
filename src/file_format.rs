@@ -108,6 +108,15 @@ pub const NUM_TX_COLUMNS: usize = 8;
 pub mod enc {
     pub const NONE: u8 = 0;
     pub const DICTIONARY: u8 = 1;
+    pub const DELTA: u8 = 2;
+    pub const RLE: u8 = 3;
+}
+
+/// Compression codec stored in segment header.
+pub mod comp {
+    pub const NONE: u8 = 0;
+    pub const ZSTD: u8 = 1;
+    pub const LZ4: u8 = 2;
 }
 
 /// Column index constants – never use raw numbers.
@@ -360,10 +369,14 @@ pub fn read_account_slot<R: Read + Seek>(
 pub struct ColumnMeta {
     /// Absolute file offset of this column's data block.
     pub offset: u64,
-    /// Byte length of this column's data block.
+    /// Byte length of this column's data block (compressed).
     pub length: u64,
-    /// Encoding type (enc::NONE or enc::DICTIONARY).
+    /// Encoding type (enc::NONE, enc::DICTIONARY, enc::DELTA, etc.).
     pub encoding: u8,
+    /// Compression codec (comp::NONE, comp::ZSTD, comp::LZ4).
+    pub compression: u8,
+    /// Uncompressed byte length (needed for decompression).
+    pub uncompressed_length: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -378,13 +391,15 @@ pub struct SegmentHeader {
     pub max_ts: u64,
     // 0x1C
     pub first_row_global_idx: u64,
-    // 0x24  col_offsets[7]
-    // 0x5C  col_lengths[7]
-    // 0x94  col_encodings[7]
+    // 0x24  col_offsets[8]
+    // 0x64  col_lengths[8]
+    // 0xA4  col_encodings[8]
+    // 0xAC  col_compression[8]
+    // 0xB4  col_uncompressed_lengths[8]
     pub columns: [ColumnMeta; NUM_TX_COLUMNS],
-    // 0x9B
+    // 0xF4
     pub data_crc32: u32,
-    // 0x9F  padding
+    // 0xF8  padding
 }
 
 impl SegmentHeader {
@@ -404,9 +419,15 @@ impl SegmentHeader {
         for c in &self.columns {
             w.write_u8(c.encoding)?;
         }
+        for c in &self.columns {
+            w.write_u8(c.compression)?;
+        }
+        for c in &self.columns {
+            w.write_u64::<LE>(c.uncompressed_length)?;
+        }
 
         w.write_u32::<LE>(self.data_crc32)?;
-        w.write_all(&[0u8; 80])?; // padding: 256 - (4+8+8+8+8 + 8*8 + 8*8 + 8 + 4) = 80
+        w.write_all(&[0u8; 8])?; // padding: 256 - (4+8+8+8+8 + 8*8 + 8*8 + 8 + 8 + 8*8 + 4) = 8
         Ok(())
     }
 
@@ -422,6 +443,8 @@ impl SegmentHeader {
         let mut offsets = [0u64; NUM_TX_COLUMNS];
         let mut lengths = [0u64; NUM_TX_COLUMNS];
         let mut encodings = [0u8; NUM_TX_COLUMNS];
+        let mut compressions = [0u8; NUM_TX_COLUMNS];
+        let mut uncompressed_lengths = [0u64; NUM_TX_COLUMNS];
 
         for o in offsets.iter_mut() {
             *o = r.read_u64::<LE>()?;
@@ -432,9 +455,15 @@ impl SegmentHeader {
         for e in encodings.iter_mut() {
             *e = r.read_u8()?;
         }
+        for c in compressions.iter_mut() {
+            *c = r.read_u8()?;
+        }
+        for u in uncompressed_lengths.iter_mut() {
+            *u = r.read_u64::<LE>()?;
+        }
 
         let data_crc32 = r.read_u32::<LE>()?;
-        let mut _pad = [0u8; 80];
+        let mut _pad = [0u8; 8];
         r.read_exact(&mut _pad)?;
 
         let mut columns = [ColumnMeta::default(); NUM_TX_COLUMNS];
@@ -442,6 +471,8 @@ impl SegmentHeader {
             c.offset = offsets[i];
             c.length = lengths[i];
             c.encoding = encodings[i];
+            c.compression = compressions[i];
+            c.uncompressed_length = uncompressed_lengths[i];
         }
 
         Ok(Self {
