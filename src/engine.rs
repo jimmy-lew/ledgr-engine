@@ -17,7 +17,7 @@
 //! For the common two-account case use the convenience method:
 //!
 //! ```rust,ignore
-//! engine.record_simple_entry(debit_acct, credit_acct, 50_000, "Rent")?;
+//! engine.record_entry(debit_acct, credit_acct, 50_000, "Rent")?;
 //! ```
 //!
 //! ## Concurrency model
@@ -196,7 +196,6 @@ impl LedgerEngine {
             id
         };
 
-        // ── 3. Construct leg Transaction rows ─────────────────────────────
         // Hashes are [0;32] at this stage; they are computed during flush
         // by the ChainTip (which reads from the MemTable's drain_sorted).
         // For WAL records we store the [0;32] placeholder; on replay the
@@ -254,7 +253,6 @@ impl LedgerEngine {
     /// ```
     ///
     /// Returns the `journal_entry_id`.
-
     pub fn record_entry(
         &self,
         debit_account: u64,
