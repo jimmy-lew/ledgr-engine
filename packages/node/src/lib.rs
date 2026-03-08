@@ -53,6 +53,7 @@ impl Engine {
         credit_account: i64,
         amount_cents: i64,
         description: String,
+        timestamp: Option<i64>,
     ) -> Result<i64> {
         if debit_account < 0 || credit_account < 0 || amount_cents < 0 {
             return Err(Error::new(
@@ -66,6 +67,7 @@ impl Engine {
                 credit_account as u64,
                 amount_cents as u64,
                 &description,
+                timestamp.map(|x| x as u64),
             )
             .map(|id| id as i64)
             .map_err(|e| Error::new(napi::Status::GenericFailure, e.to_string()))
@@ -98,7 +100,7 @@ impl Engine {
             journal_legs.push(ledger_leg);
         }
 
-        let journal_entry = JournalEntry::new(&description, journal_legs);
+        let journal_entry = JournalEntry::new(&description, journal_legs, None);
         self.inner
             .record_journal_entry(journal_entry)
             .map(|id| id as i64)
