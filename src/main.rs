@@ -78,6 +78,12 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        "stats" => {
+            if let Err(e) = cmd_stats(&args) {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
         _ => {
             eprintln!("Unknown command: {}\n", cmd);
             print_help(prog);
@@ -102,7 +108,8 @@ fn print_help(prog: &str) {
     println!("  incomestatement          Show income statement");
     println!("  print                    Show all journal entries");
     println!("  validate                 Validate ledger integrity");
-    println!("  version                  Show version");
+    println!("  stats                   Show compression statistics");
+    println!("  version                 Show version");
     println!("  --benchmark <num_tx>     Benchmark db performance");
     println!("  help                     Show this help");
     println!();
@@ -601,6 +608,118 @@ fn cmd_validate(_args: &[String]) -> Result<(), String> {
     println!("\n✓ Ledger is valid and balanced");
 
     Ok(())
+}
+
+fn cmd_stats(_args: &[String]) -> Result<(), String> {
+    let path = get_ledger_path();
+    if !path.exists() {
+        return Err(format!(
+            "Ledger not found: {}. Run 'ldb init' first.",
+            path.display()
+        ));
+    }
+
+    let engine = LedgerEngine::open(&path).map_err(|e| e.to_string())?;
+    let stats = engine.get_compression_stats();
+
+    let field_names = [
+        "id",
+        "account_id",
+        "amount",
+        "transaction_type",
+        "timestamp",
+        "description",
+        "tx_hash",
+        "journal_entry_id",
+    ];
+
+    let total_compressed: u64 = stats.col_compressed.iter().sum();
+    let total_uncompressed: u64 = stats.col_uncompressed.iter().sum();
+
+    println!("\n{:=<80}", "");
+    println!("{:^80}", "COMPRESSION STATISTICS");
+    println!("{:=<80}", "");
+    println!();
+    println!(
+        "{:20} {:>15} {:>15} {:>10} {:>12}",
+        "Field", "Uncompressed", "Compressed", "Ratio", "Savings"
+    );
+    println!(
+        "{:─<20} {:─<15} {:─<15} {:─<10} {:─<12}",
+        "", "", "", "", ""
+    );
+
+    for i in 0..8 {
+        let name = field_names[i];
+        let uncomp = stats.col_uncompressed[i];
+        let comp = stats.col_compressed[i];
+        let ratio = if uncomp > 0 {
+            comp as f64 / uncomp as f64
+        } else {
+            0.0
+        };
+        let savings = if uncomp > 0 { 1.0 - ratio } else { 0.0 };
+        println!(
+            "{:20} {:>15} {:>15} {:>9.1}% {:>11.1}%",
+            name,
+            format_size(uncomp),
+            format_size(comp),
+            ratio * 100.0,
+            savings * 100.0
+        );
+    }
+
+    println!(
+        "{:─<20} {:─<15} {:─<15} {:─<10} {:─<12}",
+        "", "", "", "", ""
+    );
+    let total_ratio = if total_uncompressed > 0 {
+        total_compressed as f64 / total_uncompressed as f64
+    } else {
+        0.0
+    };
+    let total_savings = if total_uncompressed > 0 {
+        1.0 - total_ratio
+    } else {
+        0.0
+    };
+    println!(
+        "{:20} {:>15} {:>15} {:>9.1}% {:>11.1}%",
+        "TOTAL",
+        format_size(total_uncompressed),
+        format_size(total_compressed),
+        total_ratio * 100.0,
+        total_savings * 100.0
+    );
+    println!();
+
+    let file_meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
+    println!("File size on disk: {}", format_size(file_meta.len()));
+    println!(
+        "Data size: {} ({} segments, {} transactions)",
+        format_size(total_compressed),
+        stats.segment_count,
+        stats.total_tx_count
+    );
+    println!();
+
+    Ok(())
+}
+
+fn format_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+
+    if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.2} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.2} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
 }
 
 fn cmd_benchmark(args: &[String]) -> Result<(), LedgerError> {

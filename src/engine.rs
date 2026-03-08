@@ -39,6 +39,14 @@ use crate::simd_scan;
 use crate::storage::Storage;
 use crate::wal::{Wal, WalEntry};
 
+#[derive(Debug, Clone)]
+pub struct CompressionStats {
+    pub col_compressed: [u64; 8],
+    pub col_uncompressed: [u64; 8],
+    pub segment_count: usize,
+    pub total_tx_count: u64,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // MemTable
 // ─────────────────────────────────────────────────────────────────────────────
@@ -504,6 +512,26 @@ impl LedgerEngine {
             flush_duration
         );
         Ok(())
+    }
+
+    pub fn get_compression_stats(&self) -> CompressionStats {
+        let inner = self.inner.read();
+        let mut col_compressed: [u64; 8] = [0; 8];
+        let mut col_uncompressed: [u64; 8] = [0; 8];
+
+        for seg in &inner.storage.segments {
+            for (i, c) in seg.header.columns.iter().enumerate() {
+                col_compressed[i] += c.length;
+                col_uncompressed[i] += c.uncompressed_length;
+            }
+        }
+
+        CompressionStats {
+            col_compressed,
+            col_uncompressed,
+            segment_count: inner.storage.segments.len(),
+            total_tx_count: inner.storage.header.total_tx_count,
+        }
     }
 }
 

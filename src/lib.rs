@@ -45,7 +45,7 @@ pub mod sparse_index;
 pub mod storage;
 pub mod wal;
 
-pub use engine::LedgerEngine;
+pub use engine::{CompressionStats, LedgerEngine};
 pub use error::LedgerError;
 pub use models::{Account, AccountType, ExpenseSummary, Transaction, TransactionType};
 
