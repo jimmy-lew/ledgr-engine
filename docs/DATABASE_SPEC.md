@@ -76,40 +76,40 @@ The engine follows an architecture similar to log-structured merge (LSM) trees, 
 
 Represents a ledger account (e.g., Cash, Revenue, Accounts Payable).
 
-| Field       | Type     | Description                                    |
-|-------------|----------|------------------------------------------------|
-| id          | u64      | Unique identifier (1-based)                    |
-| name        | String   | Account name (up to 64 bytes UTF-8)           |
+| Field       | Type        | Description                                      |
+|-------------|-------------|--------------------------------------------------|
+| id          | u64         | Unique identifier (1-based)                      |
+| name        | String      | Account name (up to 64 bytes UTF-8)              |
 | kind        | AccountType | Type: Asset, Liability, Equity, Revenue, Expense |
-| created_at  | u64      | Unix timestamp of creation                    |
-| balance     | i64      | Running signed balance in cents               |
+| created_at  | u64         | Unix timestamp of creation                       |
+| balance     | i64         | Running signed balance in cents                  |
 
 #### AccountType Enum
 
 | Value | Name      | Debit Effect | Credit Effect |
-|-------|-----------|---------------|---------------|
-| 0     | Asset     | Increase      | Decrease      |
-| 1     | Liability | Decrease      | Increase      |
-| 2     | Equity    | Decrease      | Increase      |
-| 3     | Revenue   | Decrease      | Increase      |
-| 4     | Expense   | Increase      | Decrease      |
+|-------|-----------|--------------|---------------|
+| 0     | Asset     | Increase     | Decrease      |
+| 1     | Liability | Decrease     | Increase      |
+| 2     | Equity    | Decrease     | Increase      |
+| 3     | Revenue   | Decreas      | Increase      |
+| 4     | Expense   | Increase     | Decrease      |
 
 #### Direction (TransactionType)
 
 | Value | Name   | Sign | Description           |
 |-------|--------|------|-----------------------|
-| 0     | Debit  | -1   | Debit leg (negative) |
+| 0     | Debit  | -1   | Debit leg (negative)  |
 | 1     | Credit | +1   | Credit leg (positive) |
 
 #### Leg
 
 A single component of a journal entry.
 
-| Field       | Type     | Description                          |
-|-------------|----------|--------------------------------------|
-| account_id  | u64      | Target account                      |
-| amount      | u64      | Positive magnitude in cents         |
-| direction   | Direction | Debit or Credit                     |
+| Field       | Type      | Description                          |
+|-------------|-----------|--------------------------------------|
+| account_id  | u64       | Target account                       |
+| amount      | u64       | Positive magnitude in cents          |
+| direction   | Direction | Debit or Credit                      |
 
 #### JournalEntry
 
@@ -117,8 +117,8 @@ A complete double-entry transaction containing multiple legs.
 
 | Field       | Type     | Description                                    |
 |-------------|----------|------------------------------------------------|
-| description | String   | Human-readable memo                           |
-| legs        | Vec<Leg> | Must contain at least 2 legs                  |
+| description | String   | Human-readable memo                            |
+| legs        | Vec<Leg> | Must contain at least 2 legs                   |
 
 **Invariant**: `∑ leg.signed_amount() == 0` (debits == credits)
 
@@ -129,13 +129,13 @@ Immutable storage row representing one leg on disk.
 | Field            | Type     | Description                                              |
 |------------------|----------|----------------------------------------------------------|
 | id               | u64      | Globally unique leg ID (monotonically increasing)        |
-| journal_entry_id | u64      | Groups all legs of the same journal entry               |
+| journal_entry_id | u64      | Groups all legs of the same journal entry                |
 | account_id       | u64      | Target account                                           |
-| amount           | i64      | Signed cents: negative for debits, positive for credits |
+| amount           | i64      | Signed cents: negative for debits, positive for credits  |
 | transaction_type | Direction | Debit or Credit                                         |
-| timestamp        | u64      | Unix timestamp                                          |
-| description      | String   | Copy of journal entry description                      |
-| tx_hash          | [u8; 32] | SHA-256 hash chaining to previous transaction          |
+| timestamp        | u64      | Unix timestamp                                           |
+| description      | String   | Copy of journal entry description                        |
+| tx_hash          | [u8; 32] | SHA-256 hash chaining to previous transaction            |
 
 ---
 
@@ -145,22 +145,22 @@ All multi-byte integers use **little-endian** byte order.
 
 ### 3.1 File Header (512 bytes at offset 0)
 
-| Offset | Size | Field                        | Type   |
-|--------|------|------------------------------|--------|
+| Offset | Size | Field                       | Type          |
+|--------|------|-----------------------------|---------------|
 | 0x000  | 4    | Magic bytes                 | [u8;4] "LDGR" |
 | 0x004  | 1    | Version                     | u8     (0x01) |
-| 0x005  | 3    | Reserved (zero)              | [u8;3] |
-| 0x008  | 8    | accounts_count              | u64    |
-| 0x010  | 8    | segment_count               | u64    |
-| 0x018  | 8    | segments_end_offset         | u64    |
-| 0x020  | 8    | sparse_index_count          | u64    |
-| 0x028  | 8    | total_tx_count              | u64    |
-| 0x030  | 32   | genesis_hash                | [u8;32] |
-| 0x050  | 32   | last_tx_hash                | [u8;32] |
-| 0x070  | 4    | header_crc32                | u32    |
-| 0x074  | 8    | sparse_checkpoint_offset    | u64    |
-| 0x07C  | 8    | sparse_checkpoint_seg_count | u64    |
-| 0x084  | 376  | Padding (zeroes)            | [u8;376] |
+| 0x005  | 3    | Reserved (zero)             | [u8;3]        |
+| 0x008  | 8    | accounts_count              | u64           |
+| 0x010  | 8    | segment_count               | u64           |
+| 0x018  | 8    | segments_end_offset         | u64           |
+| 0x020  | 8    | sparse_index_count          | u64           |
+| 0x028  | 8    | total_tx_count              | u64           |
+| 0x030  | 32   | genesis_hash                | [u8;32]       |
+| 0x050  | 32   | last_tx_hash                | [u8;32]       |
+| 0x070  | 4    | header_crc32                | u32           |
+| 0x074  | 8    | sparse_checkpoint_offset    | u64           |
+| 0x07C  | 8    | sparse_checkpoint_seg_count | u64           |
+| 0x084  | 376  | Padding (zeroes)            | [u8;376]      |
 
 **Total**: 512 bytes (0x200)
 
@@ -170,7 +170,7 @@ All multi-byte integers use **little-endian** byte order.
 
 | Offset | Size | Field        | Type    |
 |--------|------|--------------|---------|
-| 0x00   | 1    | is_active   | u8      (0 = empty, 1 = occupied) |
+| 0x00   | 1    | is_active    | u8      (0 = empty, 1 = occupied) |
 | 0x01   | 8    | id           | u64     |
 | 0x09   | 1    | kind         | u8      (AccountType) |
 | 0x0A   | 8    | created_at   | u64     |
@@ -191,25 +191,29 @@ All multi-byte integers use **little-endian** byte order.
 | 0x14   | 8    | max_ts                 | u64 (zone map hi) |
 | 0x1C   | 8    | first_row_global_idx   | u64               |
 | 0x24   | 64   | col_offsets[8]         | [u64;8]           |
-| 0x64   | 64   | col_lengths[8]         | [u64;8]           |
+| 0x64   | 64   | col_lengths[8]         | [u64;8] (compressed) |
 | 0xA4   | 8    | col_encodings[8]       | [u8;8]            |
-| 0xAC   | 4    | data_crc32             | u32               |
-| 0xB0   | 80   | Padding                | [u8;80]           |
+| 0xAC   | 8    | col_compression[8]     | [u8;8]            |
+| 0xB4   | 64   | col_uncompressed_len[8]| [u64;8]           |
+| 0xF4   | 4    | data_crc32             | u32               |
+| 0xF8   | 8    | Padding                | [u8;8]            |
 
 **Total**: 256 bytes
 
-### 3.4 Column Layout (per segment)
+### 3.4 Column Layout (per segment, with compression)
 
-| Index | Name             | Encoding     | Element Size         |
-|-------|------------------|--------------|---------------------|
-| 0     | id               | None         | 8 bytes             |
-| 1     | account_id       | None         | 8 bytes             |
-| 2     | amount           | None         | 8 bytes (signed)   |
-| 3     | transaction_type | Dictionary   | 1 byte code        |
-| 4     | timestamp        | None         | 8 bytes             |
-| 5     | description      | None         | 4+N bytes (length-prefixed) |
-| 6     | tx_hash          | None         | 32 bytes            |
-| 7     | journal_entry_id | None         | 8 bytes             |
+| Index | Name             | Default Encoding | Compression | Element Size (uncompressed) |
+|-------|------------------|-----------------|-------------|---------------------------|
+| 0     | id               | Delta           | ZSTD        | 8 bytes                  |
+| 1     | account_id       | RLE             | ZSTD        | 8 bytes                  |
+| 2     | amount           | Delta           | ZSTD        | 8 bytes (signed)         |
+| 3     | transaction_type | Dictionary      | ZSTD        | 1 byte code              |
+| 4     | timestamp        | Delta           | ZSTD        | 8 bytes                  |
+| 5     | description      | Dictionary      | ZSTD        | 4+N bytes (length-prefixed) |
+| 6     | tx_hash          | None            | LZ4         | 32 bytes                 |
+| 7     | journal_entry_id | Delta           | ZSTD        | 8 bytes                  |
+
+**Compression codecs**: ZSTD (default), LZ4 (fast), or None
 
 ### 3.5 Sparse Timestamp Index
 
@@ -365,16 +369,146 @@ Two-phase integrity verification:
 
 ---
 
+## 6b. Compression
+
+The ledger engine uses a two-layer compression approach inspired by ClickHouse and Parquet:
+
+### Layer 1: Column-Specific Encodings
+
+Applied before block compression to exploit data patterns:
+
+| Column      | Encoding   | Rationale                              |
+|-------------|------------|----------------------------------------|
+| id          | Delta      | Monotonically increasing → small deltas |
+| account_id  | RLE        | Repeats within journal entries         |
+| amount      | Delta      | Similar magnitudes → small deltas      |
+| transaction_type | Dictionary | Only 2 values                   |
+| timestamp   | Delta      | Monotonically increasing              |
+| description | Dictionary | Common prefixes, repeated patterns     |
+| tx_hash     | None       | Random data (SHA-256)                 |
+| journal_entry_id | Delta | Groups sequential legs                |
+
+#### Delta Encoding
+
+Delta encoding stores the difference between consecutive values rather than the values themselves. For monotonically increasing sequences like `id`, `timestamp`, and `journal_entry_id`, the differences are typically very small (often 1-8 bytes). This converts an 8-byte value into 1-4 bytes in most cases.
+
+- **How it works**: For each value `V[i]`, store `D[i] = V[i] - V[i-1]` (with `V[0]` stored as-is)
+- **Why chosen**: Financial ledgers have sequential IDs and timestamps that increment steadily. A transaction at timestamp 1700000000 followed by 1700000001 produces a delta of just 1, which encodes to a single byte vs 8 bytes raw.
+- **Best for**: id, timestamp, journal_entry_id, amount (amounts in similar ranges have small differences)
+
+#### Run-Length Encoding (RLE)
+
+RLE compresses consecutive identical values into a (value, count) pair. When a journal entry has multiple legs affecting the same account, or when bulk operations occur, consecutive rows often share the same account_id.
+
+- **How it works**: Instead of `A, A, A, A, A`, store `A x 5`
+- **Why chosen**: In double-entry bookkeeping, each journal entry creates multiple legs (debit + credit). If cash account appears in 10 consecutive transactions, that's 10x compression. Typical ledger patterns show high repetition.
+- **Best for**: account_id, any column with burst repetition
+
+#### Dictionary Encoding
+
+Dictionary encoding replaces repeated string values with integer indices. A lookup table maps unique values to small integers. For `transaction_type` (only 2 values) and repeated description strings, this is extremely efficient.
+
+- **How it works**: Build a map of unique values → 1, 2, or 4-byte indices. Replace each occurrence with its index.
+- **Why chosen**: 
+  - `transaction_type` has only 2 unique values ("debit", "credit"), achieving ~8x compression per value
+  - Descriptions like "Purchase", "Payment received", "Transfer" repeat frequently across journal entries
+  - Transaction types are accessed frequently in queries, so decoding is cheap
+- **Best for**: transaction_type (2 values → 1 byte), description (high repetition of standard terms)
+
+#### None (Raw)
+
+Some data has no exploitable patterns. SHA-256 hashes are effectively random - compression algorithms cannot find patterns in uniformly distributed data.
+
+- **How it works**: No transformation; data stored as-is
+- **Why chosen**: tx_hash contains SHA-256 output which is pseudorandom. Attempting to compress random data often increases size due to compression dictionary overhead.
+- **Best for**: tx_hash (SHA-256 output is incompressible)
+
+### Layer 2: Block Compression
+
+Applied to encoded column data:
+
+| Codec  | Use Case                    | Compression Ratio | Speed    |
+|--------|----------------------------|-------------------|----------|
+| ZSTD   | Default (balanced)         | 3-5x              | Fast     |
+| LZ4    | Hot data, low latency      | 2-3x              | Very Fast|
+| None   | Debugging                  | 1x                | N/A      |
+
+#### ZSTD (Zstandard)
+
+ZSTD is a real-time compression algorithm by Facebook that balances compression ratio and speed. It uses finite state entropy coding (similar to Huffman) combined with LZ77-style dictionary matching.
+
+- **How it works**: 
+  1. Finds repeated byte sequences (LZ77 matching)
+  2. Encodes matches as (distance, length) references
+  3. Uses FSE (Finite State Entropy) for symbol encoding
+  4. Employs a sliding window (default 128KB) for context
+- **Why chosen**: 
+  - Excellent ratio (3-5x on financial data)
+  - Fast decompression (critical for read-heavy analytical queries)
+  - Configurable compression levels for trade-offs
+  - Well-suited for columnar data with repeated patterns after Layer 1 encoding
+- **Best for**: Default for all columns except tx_hash; ideal for analytical workloads
+
+#### LZ4
+
+LZ4 is optimized for extreme speed, sacrificing some compression ratio. It uses LZ77-style matching with a simple byte-oriented approach.
+
+- **How it works**:
+  1. Hash-based matching for fast repeated sequence detection
+  2. Minimal entropy coding (raw matches)
+  3. No sliding window (processes in blocks)
+- **Why chosen**:
+  - ~10x faster than ZSTD for similar data
+  - Useful for hot/warm data that changes frequently
+  - Acceptable 2-3x compression still beats raw storage
+- **Best for**: tx_hash (fast despite lower ratio), write-heavy workloads, low-latency requirements
+
+### Combined Effect
+
+The two layers work together:
+1. **Layer 1** transforms data into more compressible forms (small integers, repeated values)
+2. **Layer 2** finds remaining patterns across the entire column block
+
+For example, a transaction column:
+- Raw: `[1, 2, 3, 4, 5, ...]` → 8 bytes each
+- After Delta: `[1, 1, 1, 1, 1, ...]` → 1 byte each  
+- After ZSTD: `[1, 1, 1, 1, 1, ...]` → ~20 bytes total for 1000 values
+
+### API
+
+```rust
+// Open with default ZSTD compression
+let engine = LedgerEngine::open("ledger.ldg")?;
+
+// Open with LZ4 compression (faster)
+let engine = LedgerEngine::open_with_compression("ledger.ldg", CompressionCodec::Lz4)?;
+
+// Change compression at runtime
+engine.set_compression_codec(CompressionCodec::Zstd);
+```
+
+### Storage Format
+
+Each column stores:
+- **compressed_length**: Size on disk (after encoding + compression)
+- **uncompressed_length**: Original size (for decompression)
+- **encoding**: Column-specific encoding type
+- **compression**: Block compression codec used
+
+---
+
 ## 7. Dependencies
 
 | Crate       | Version | Purpose                           |
 |-------------|---------|-----------------------------------|
 | crc32fast   | 1.4     | CRC32 checksums                  |
-| byteorder   | 1.5     | Little-endian byte serialization |
+| byteorder   | 1.5     | Deterministic LE byte serialisation |
 | sha2        | 0.10    | SHA-256 for hash chain           |
 | hex         | 0.4     | Debug display of hashes          |
 | thiserror   | 1.0     | Error types                      |
 | parking_lot | 0.12    | Fast RwLock/Mutex                |
+| zstd        | 0.13    | ZSTD compression (default)       |
+| lz4_flex    | 0.11    | LZ4 compression (fast alternative) |
 
 ---
 
