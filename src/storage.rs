@@ -350,17 +350,11 @@ impl Storage {
             .collect();
         self.sparse.extend(&new_row_pairs);
 
-        // ── Checkpoint: write sparse index to disk every N flushes ─────────────
-        let do_checkpoint = (self.header.segment_count + 1) % CHECKPOINT_INTERVAL == 0;
-        let checkpoint_offset = if do_checkpoint {
-            Some(self.write_sparse_checkpoint(new_segments_end)?)
-        } else {
-            None
-        };
-
         // ── Truncate file to exactly what we've written ────────────────────
-        let sparse_bytes = checkpoint_offset.unwrap_or(0);
-        let new_file_len = new_segments_end + sparse_bytes as u64;
+        // Note: We ALWAYS write the sparse index after each segment (legacy format)
+        // This ensures the file is always readable
+        let sparse_bytes = self.sparse.write_to(&mut self.file)? as u64;
+        let new_file_len = new_segments_end + sparse_bytes;
         self.file.set_len(new_file_len)?;
 
         // ── Update + rewrite file header (logical commit) ─────────────────
@@ -369,12 +363,9 @@ impl Storage {
         self.header.sparse_index_count = self.sparse.len() as u64;
         self.header.total_tx_count += row_count;
         self.header.last_tx_hash = chain_tip.last_hash;
-
-        // Update checkpoint info if we just wrote a checkpoint
-        if let Some(offset) = checkpoint_offset {
-            self.header.sparse_checkpoint_offset = offset;
-            self.header.sparse_checkpoint_seg_count = self.header.segment_count;
-        }
+        // Write sparse index immediately after segment (legacy format, always written)
+        self.header.sparse_checkpoint_offset = new_segments_end;
+        self.header.sparse_checkpoint_seg_count = self.header.segment_count;
 
         // ── Write all account balances to disk ────────────────────────────────
         for (slot, acct) in self.accounts.values() {
