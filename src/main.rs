@@ -1,4 +1,5 @@
 use ledger_engine::models::Direction;
+use ledger_engine::utils::print_ascii_table;
 use ledger_engine::*;
 use std::env;
 use std::path::PathBuf;
@@ -237,30 +238,22 @@ fn cmd_accounts(_args: &[String]) -> Result<(), String> {
         return Ok(());
     }
 
-    let _name_width = accounts
+    let headers = ["ID", "Type", "Balance", "Name"];
+    let rows: Vec<Vec<String>> = accounts
         .iter()
-        .map(|a| a.name.len())
-        .max()
-        .unwrap_or(10)
-        .max(10);
-    let header = format!("{:>4} {:>10} {:>15} {}", "ID", "Type", "Balance", "Name");
-    let sep = "-".repeat(header.len());
+        .map(|a| {
+            let bal = a.balance as f64 / 100.0;
+            vec![
+                a.id.to_string(),
+                format!("{:?}", a.kind),
+                format!("{:.2}", bal),
+                a.name.clone(),
+            ]
+        })
+        .collect();
 
-    println!("{}", header);
-    println!("{}", sep);
+    println!("{}", print_ascii_table(&headers, &rows));
 
-    for a in &accounts {
-        let bal = a.balance as f64 / 100.0;
-        println!(
-            "{:>4} {:>10} {:>15.2} {}",
-            a.id,
-            format!("{:?}", a.kind),
-            bal,
-            a.name
-        );
-    }
-
-    println!("{}", sep);
     let total: f64 = accounts.iter().map(|a| a.balance as f64).sum::<f64>() / 100.0;
     println!("{:>4} {:>10} {:>15.2} {}", "", "TOTAL", total, "");
 
@@ -354,96 +347,53 @@ fn cmd_balance(_args: &[String]) -> Result<(), String> {
         }
     }
 
-    let name_width = accounts
-        .iter()
-        .map(|a| a.name.len())
-        .max()
-        .unwrap_or(10)
-        .max(10);
-    let w = 4 + 3 + 10 + 3 + 15 + 3 + name_width;
-
-    println!("\n{:─^width$}", " BALANCE ", width = w);
-    println!(
-        "│ {:^width$} │",
-        format!("{} accounts", accounts.len()),
-        width = w - 2
-    );
-    println!(
-        "├{0}┬{1}┬{2}┬{3}┤",
-        "─".repeat(4),
-        "─".repeat(10),
-        "─".repeat(15),
-        "─".repeat(name_width + 2)
-    );
-    println!(
-        "│ {:<2} │ {:<8} │ {:>13} │ {:<width$} │",
-        "ID",
-        "Type",
-        "Balance",
-        "Name",
-        width = name_width
-    );
-    println!(
-        "├{0}┼{1}┼{2}┼{3}┤",
-        "─".repeat(4),
-        "─".repeat(10),
-        "─".repeat(15),
-        "─".repeat(name_width + 2)
-    );
-
     let mut asset_total = 0i64;
     let mut liab_total = 0i64;
     let mut equity_total = 0i64;
     let mut revenue_total = 0i64;
     let mut expense_total = 0i64;
 
-    for a in &accounts {
-        let display_balance = match a.kind {
-            AccountType::Asset | AccountType::Expense => -a.balance,
-            AccountType::Liability | AccountType::Equity | AccountType::Revenue => a.balance,
-        };
-        let bal_str = format!("{:>13.2}", display_balance as f64 / 100.0);
-        println!(
-            "│ {:<2} │ {:<8} │ {:>13} │ {:<width$} │",
-            a.id,
-            format!("{:?}", a.kind),
-            bal_str,
-            a.name,
-            width = name_width
-        );
+    let headers = ["ID", "Type", "Balance", "Name"];
+    let rows: Vec<Vec<String>> = accounts
+        .iter()
+        .map(|a| {
+            let display_balance = match a.kind {
+                AccountType::Asset | AccountType::Expense => -a.balance,
+                AccountType::Liability | AccountType::Equity | AccountType::Revenue => a.balance,
+            };
+            let bal_str = format!("{:.2}", display_balance as f64 / 100.0);
 
-        match a.kind {
-            AccountType::Asset => asset_total += a.balance,
-            AccountType::Liability => liab_total += a.balance,
-            AccountType::Equity => equity_total += a.balance,
-            AccountType::Revenue => revenue_total += a.balance,
-            AccountType::Expense => expense_total += a.balance,
-        }
-    }
+            match a.kind {
+                AccountType::Asset => asset_total += a.balance,
+                AccountType::Liability => liab_total += a.balance,
+                AccountType::Equity => equity_total += a.balance,
+                AccountType::Revenue => revenue_total += a.balance,
+                AccountType::Expense => expense_total += a.balance,
+            }
 
-    println!(
-        "├{0}┴{1}┴{2}┴{3}┤",
-        "─".repeat(4),
-        "─".repeat(10),
-        "─".repeat(15),
-        "─".repeat(name_width + 2)
-    );
+            vec![
+                a.id.to_string(),
+                format!("{:?}", a.kind),
+                bal_str,
+                a.name.clone(),
+            ]
+        })
+        .collect();
+
+    println!("\n{:─^50}", " BALANCE ");
+    println!("{:^50}", format!("{} accounts", accounts.len()));
+    println!("{}", print_ascii_table(&headers, &rows));
 
     let net = asset_total + liab_total + equity_total + revenue_total + expense_total;
     println!(
-        "│ {:<width$} │",
-        format!(
-            "NET: {:>13.2}  {}",
-            net as f64 / 100.0,
-            if net == 0 {
-                "✓ balanced"
-            } else {
-                "✗ UNBALANCED"
-            }
-        ),
-        width = w - 2
+        "NET: {:>13.2}  {}",
+        net as f64 / 100.0,
+        if net == 0 {
+            "✓ balanced"
+        } else {
+            "✗ UNBALANCED"
+        }
     );
-    println!("└{}┘", "─".repeat(w));
 
     Ok(())
 }
@@ -640,14 +590,9 @@ fn cmd_stats(_args: &[String]) -> Result<(), String> {
     println!("{:^80}", "COMPRESSION STATISTICS");
     println!("{:=<80}", "");
     println!();
-    println!(
-        "{:20} {:>15} {:>15} {:>10} {:>12}",
-        "Field", "Uncompressed", "Compressed", "Ratio", "Savings"
-    );
-    println!(
-        "{:─<20} {:─<15} {:─<15} {:─<10} {:─<12}",
-        "", "", "", "", ""
-    );
+
+    let headers = ["Field", "Uncompressed", "Compressed", "Ratio", "Savings"];
+    let mut rows: Vec<Vec<String>> = Vec::new();
 
     for i in 0..8 {
         let name = field_names[i];
@@ -659,20 +604,17 @@ fn cmd_stats(_args: &[String]) -> Result<(), String> {
             0.0
         };
         let savings = if uncomp > 0 { 1.0 - ratio } else { 0.0 };
-        println!(
-            "{:20} {:>15} {:>15} {:>9.1}% {:>11.1}%",
-            name,
+        rows.push(vec![
+            name.to_string(),
             format_size(uncomp),
             format_size(comp),
-            ratio * 100.0,
-            savings * 100.0
-        );
+            format!("{:.1}%", ratio * 100.0),
+            format!("{:.1}%", savings * 100.0),
+        ]);
     }
 
-    println!(
-        "{:─<20} {:─<15} {:─<15} {:─<10} {:─<12}",
-        "", "", "", "", ""
-    );
+    println!("{}", print_ascii_table(&headers, &rows));
+
     let total_ratio = if total_uncompressed > 0 {
         total_compressed as f64 / total_uncompressed as f64
     } else {
@@ -684,8 +626,7 @@ fn cmd_stats(_args: &[String]) -> Result<(), String> {
         0.0
     };
     println!(
-        "{:20} {:>15} {:>15} {:>9.1}% {:>11.1}%",
-        "TOTAL",
+        "TOTAL {:>15} {:>15} {:>9.1}% {:>11.1}%",
         format_size(total_uncompressed),
         format_size(total_compressed),
         total_ratio * 100.0,
