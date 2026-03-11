@@ -43,6 +43,7 @@ pub mod models;
 pub mod simd_scan;
 pub mod sparse_index;
 pub mod storage;
+pub mod utils;
 pub mod wal;
 
 pub use engine::{CompressionStats, LedgerEngine};
