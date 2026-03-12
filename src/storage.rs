@@ -22,22 +22,20 @@
 //! unflushed rows and the file is internally consistent.  Only step 5
 //! (the header rewrite) is the logical commit point.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-use byteorder::{ReadBytesExt, WriteBytesExt, LE};
-
 use crate::encoders::{
-    BlockCompressor, CompressionCodec, DeltaEncoder, DeltaEncoderU64, DictionaryEncoder, RleEncoder,
+    BlockCompressor, CompressionCodec, DeltaEncoder, DeltaEncoderU64, RleEncoder,
 };
 use crate::error::{LedgerError, Result};
 use crate::file_format::{
     self, col, comp, enc, ColumnMeta, FileHeader, SegmentHeader, ACCOUNT_RECORD_SIZE,
     FILE_HEADER_SIZE, MAX_ACCOUNTS, NUM_TX_COLUMNS,
 };
-use crate::hash_chain::{self, ChainTip};
+use crate::hash_chain::ChainTip;
 use crate::models::{Account, AccountType, Transaction, TransactionType};
 use crate::sparse_index::{SparseEntry, SparseIndex, SPARSE_FACTOR};
 
