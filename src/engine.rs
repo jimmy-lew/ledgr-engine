@@ -535,6 +535,21 @@ impl LedgerEngine {
     }
 }
 
+impl Drop for LedgerEngine {
+    fn drop(&mut self) {
+        if let Some(mut inner) = self.inner.try_write() {
+            if !inner.memtable.is_empty() {
+                if let Err(e) = Self::do_flush(&mut inner) {
+                    eprintln!("Warning: failed to flush on drop: {}", e);
+                }
+            }
+            if let Err(e) = inner.wal.sync() {
+                eprintln!("Warning: failed to sync WAL on drop: {}", e);
+            }
+        }
+    }
+}
+
 fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

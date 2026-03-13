@@ -34,6 +34,7 @@
 //! WAL lives in a *separate* `wal.log` alongside the `.ldg` file.
 //! ```
 
+pub mod cli;
 pub mod encoders;
 pub mod engine;
 pub mod error;

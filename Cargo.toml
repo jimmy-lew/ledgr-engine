@@ -13,6 +13,10 @@ thiserror   = "1.0"           # Ergonomic error types
 parking_lot = "0.12"          # Faster RwLock / Mutex than std
 zstd        = "0.13"          # ZSTD compression (default)
 lz4_flex    = "0.11"          # LZ4 compression (fast alternative)
+clap        = { version = "4.5", features = ["derive"] }  # CLI parsing
+dirs        = "5"             # Cross-platform directories
+comfy-table = "7"             # Rich table formatting
+rustyline   = "14"            # Interactive shell with history
 
 [dev-dependencies]
 tempfile    = "3"             # Disposable directories in tests
