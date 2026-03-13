@@ -166,6 +166,8 @@ pub struct FileHeader {
     pub sparse_checkpoint_offset: u64,
     // 0x07C  Segment count when checkpoint was written
     pub sparse_checkpoint_seg_count: u64,
+    // 0x084  Number of sparse entries at checkpoint
+    pub sparse_checkpoint_entry_count: u64,
 }
 
 impl FileHeader {
@@ -183,6 +185,7 @@ impl FileHeader {
             header_crc32: 0,
             sparse_checkpoint_offset: 0,
             sparse_checkpoint_seg_count: 0,
+            sparse_checkpoint_entry_count: 0,
         }
     }
 
@@ -202,8 +205,9 @@ impl FileHeader {
         v.extend_from_slice(&self.last_tx_hash);
         v.extend_from_slice(&self.sparse_checkpoint_offset.to_le_bytes());
         v.extend_from_slice(&self.sparse_checkpoint_seg_count.to_le_bytes());
-        debug_assert_eq!(v.len(), 0x080);
-        v.resize(0x084, 0u8); // pad to 132 bytes for CRC computation
+        v.extend_from_slice(&self.sparse_checkpoint_entry_count.to_le_bytes());
+        debug_assert_eq!(v.len(), 0x088);
+        v.resize(0x088, 0u8); // pad to 136 bytes for CRC computation
         v
     }
 
@@ -279,6 +283,7 @@ impl FileHeader {
             header_crc32: stored_crc,
             sparse_checkpoint_offset: read_u64(&raw, 0x074),
             sparse_checkpoint_seg_count: read_u64(&raw, 0x07C),
+            sparse_checkpoint_entry_count: read_u64(&raw, 0x084),
         })
     }
 }

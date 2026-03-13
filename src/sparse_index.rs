@@ -92,6 +92,27 @@ impl SparseIndex {
         Ok(8 + self.entries.len() * 16)
     }
 
+    /// Write only new entries starting from `start_idx` (incremental append).
+    /// Does NOT write a count header - just raw entries for appending.
+    /// Returns the number of bytes written.
+    pub fn write_incremental<W: Write>(&self, start_idx: usize, w: &mut W) -> Result<usize> {
+        let new_entries = &self.entries[start_idx..];
+        let mut bytes = 0;
+        for e in new_entries {
+            w.write_u64::<LE>(e.timestamp)?;
+            w.write_u64::<LE>(e.global_row_idx)?;
+            bytes += 16;
+        }
+        Ok(bytes)
+    }
+
+    /// Write the count header at the current position.
+    /// Call this before write_incremental to set up the file correctly.
+    pub fn write_count_header<W: Write>(count: u64, w: &mut W) -> Result<()> {
+        w.write_u64::<LE>(count)?;
+        Ok(())
+    }
+
     /// Read from `r` at absolute file offset `offset`.
     pub fn read_from<R: Read + Seek>(r: &mut R, offset: u64, count: u64) -> Result<Self> {
         r.seek(SeekFrom::Start(offset))?;

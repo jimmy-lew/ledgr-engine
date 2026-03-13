@@ -348,12 +348,29 @@ impl Storage {
             .collect();
         self.sparse.extend(&new_row_pairs);
 
-        // ── Truncate file to exactly what we've written ────────────────────
-        // Note: We ALWAYS write the sparse index after each segment (legacy format)
-        // This ensures the file is always readable
-        let sparse_bytes = self.sparse.write_to(&mut self.file)? as u64;
-        let new_file_len = new_segments_end + sparse_bytes;
-        self.file.set_len(new_file_len)?;
+        // ── Write sparse index incrementally (append new entries only) ───────────
+        let last_checkpoint_entry_count = self.header.sparse_checkpoint_entry_count as usize;
+        let new_entry_count = self.sparse.len();
+
+        if last_checkpoint_entry_count == 0 {
+            // First checkpoint: write full index with count header
+            self.file.seek(SeekFrom::Start(new_segments_end))?;
+            let sparse_bytes = self.sparse.write_to(&mut self.file)? as u64;
+            let new_file_len = new_segments_end + sparse_bytes;
+            self.file.set_len(new_file_len)?;
+        } else {
+            // Incremental: update count, then append new entries
+            self.file.seek(SeekFrom::Start(new_segments_end))?;
+            SparseIndex::write_count_header(new_entry_count as u64, &mut self.file)?;
+            let sparse_bytes = self
+                .sparse
+                .write_incremental(last_checkpoint_entry_count, &mut self.file)?
+                as u64;
+            // Account for count header (8 bytes) + new entries
+            let total_sparse_bytes = 8 + sparse_bytes;
+            let new_file_len = new_segments_end + total_sparse_bytes;
+            self.file.set_len(new_file_len)?;
+        }
 
         // ── Update + rewrite file header (logical commit) ─────────────────
         self.header.segment_count += 1;
@@ -361,9 +378,9 @@ impl Storage {
         self.header.sparse_index_count = self.sparse.len() as u64;
         self.header.total_tx_count += row_count;
         self.header.last_tx_hash = chain_tip.last_hash;
-        // Write sparse index immediately after segment (legacy format, always written)
         self.header.sparse_checkpoint_offset = new_segments_end;
         self.header.sparse_checkpoint_seg_count = self.header.segment_count;
+        self.header.sparse_checkpoint_entry_count = new_entry_count as u64;
 
         // ── Write all account balances to disk ────────────────────────────────
         for (slot, acct) in self.accounts.values() {
